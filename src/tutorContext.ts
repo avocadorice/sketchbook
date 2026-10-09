@@ -1,14 +1,15 @@
 import { sceneAt, type Scene } from "./history";
 import type { Project } from "./storage";
 export type Focus = { x: number; y: number; width: number; height: number };
-export function inFocus(scene: Scene, focus: Focus | null): Scene {
+export function inFocus(scene: Scene, focus: Focus | Focus[] | null): Scene {
   if (!focus) return scene;
-  return { ...scene, elements: scene.elements.filter(e => {
+  const regions = Array.isArray(focus) ? focus : [focus];
+  return { ...scene, elements: scene.elements.filter(e => regions.some(focus => {
     const x = Number(e.x ?? 0), y = Number(e.y ?? 0), w = Number(e.width ?? 0), h = Number(e.height ?? 0);
     return x + Math.abs(w) >= focus.x && x <= focus.x + focus.width && y + Math.abs(h) >= focus.y && y <= focus.y + focus.height;
-  }) };
+  })) };
 }
-export function tutorContext(project: Project, focus: Focus | null) {
+export function tutorContext(project: Project, focus: Focus | Focus[] | null) {
   const index = project.draft.index ?? project.attempt.chapters.length;
   const prior = project.attempt.chapters.slice(0, index).map((chapter, i) => ({ id: chapter.id, number: i + 1, title: chapter.title, scene: inFocus(sceneAt(project.attempt, i), focus) }));
   return { title: project.attempt.prompt, checkpointId: project.draft.index === null ? project.draft.id ?? `next-${project.attempt.chapters.length}` : project.attempt.chapters[index]?.id,

@@ -1,11 +1,11 @@
-# Sketchbook
+# System Design Practice
 
-A dark Excalidraw workspace for working through system designs. Keep numbered attempts, edit ordered checkpoints, and ask an AI tutor about a specific part of your diagram without scattering the conversation across providers.
+A dark Excalidraw workspace for working through system designs. Organize practice problems into numbered attempts, edit ordered checkpoints, and ask an AI tutor about a specific part of your diagram without scattering the conversation across providers.
 
-- **Attempts and Tutor stay visible together**, with independent show/hide controls.
-- **Search** drawing titles and text inside any saved checkpoint or draft.
+- **Practice Problems and Tutor stay visible together**, with independent show/hide controls.
+- **Search** problem titles and text inside any saved checkpoint or draft.
 - **Checkpoints** have inline titles, reorder controls, deletion with immediate undo, and incremental or clean-slate starts.
-- **Focus area** draws a temporary overlay, separate from the drawing. The tutor receives a cropped image and scene content within the region.
+- **Tutor sees the visible canvas** at your current zoom and pan, captured as PNG pixels. Hold **Option + Shift and drag** to add one or more temporary focus regions, separate from the sketch. Regions stay anchored to the diagram while zooming and panning; visible portions are sent as numbered crops. Clear focus to return to the full viewport. Each question lets you view its exact submitted image.
 - **One conversation per attempt** survives agent switches and device changes. A question at checkpoint 3 includes checkpoints 1–2; later checkpoint scenes and conversations are excluded. The full transcript remains visible.
 - **Native macOS app**, or use a browser over your Tailscale network.
 
@@ -31,7 +31,7 @@ The server defaults to listening on all interfaces for LAN compatibility; `--hos
 
 ```sh
 SKETCHBOOK_URL='https://your-host.your-tailnet.ts.net/static/practice/index.html' bash mac/build.sh
-open ~/Applications/Sketchbook.app
+open "$HOME/Applications/System Design Practice.app"
 ```
 
 The wrapper uses WKWebView, native file dialogs, dark appearance and normal Mac keyboard shortcuts. Build with Xcode Command Line Tools. It connects to your host; it does not start a second library. The application is locally signed, not notarized. An installed app's URL can be changed with:
@@ -58,16 +58,18 @@ References: [Codex authentication](https://learn.chatgpt.com/docs/auth), [Claude
 
 Personal data stays in `.local/`, excluded from Git:
 
-- `.local/practice/project.json`: drawings, embedded images, checkpoint deltas and drafts.
+- `.local/practice/project.json`: problems, attempts, embedded images, checkpoint deltas and drafts.
 - `.local/practice/backups/`: first pre-save snapshot each day.
 - `.local/tutor/conversations.sqlite`: shared conversations, checkpoint context and job status.
 - `.local/tutor/`: submitted PNGs and local provider diagnostics.
 
-Back up **all of `.local/`**, preferably while the server is stopped. Export whole library includes drawing data; Tutor's Export downloads the visible conversation. A complete migration, including images attached to chats, requires copying `.local/`. Imports get new attempt IDs, so importing a duplicate never mixes its tutor conversation with the original.
+Back up **all of `.local/`**, preferably while the server is stopped. Export all problems includes sketch data; Tutor's Export downloads the visible conversation. A complete migration, including images attached to chats, requires copying `.local/`. Imports get new attempt IDs, so importing a duplicate never mixes its tutor conversation with the original.
+
+Each practice problem has an editable title and its own numbered attempts. Legacy entries with matching titles are grouped without changing their attempt IDs or tutor history. Historical bundle/preferences identifiers are retained so the renamed app keeps existing settings.
 
 Saves use optimistic revisions. Two devices can read the same library; a stale editor cannot overwrite another device's changes. Reload a stale editor after exporting any unsaved draft.
 
-Deleting a checkpoint removes its changes and rebuilds later incremental checkpoints. A clean-slate checkpoint creates an explicit boundary, so earlier edits cannot reappear through it. Switching checkpoints retains unsaved drafts. Undo restores the most recent deletion until another drawing mutation or navigation; daily backups provide additional recovery. Removed attempt conversations remain on disk for recovery. Legacy notes and timing data are preserved in storage/import/export, though their controls are no longer shown.
+Deleting a checkpoint removes its changes and rebuilds later incremental checkpoints. A clean-slate checkpoint creates an explicit boundary, so earlier edits cannot reappear through it. Switching checkpoints retains unsaved drafts. Undo restores the most recent deletion until another sketch edit or navigation; daily backups provide additional recovery. Removed attempt conversations remain on disk for recovery. Legacy notes and timing data are preserved in storage/import/export, though their controls are no longer shown.
 
 The historical `/static/practice/` URL and browser storage IDs remain for compatibility. Source is independent of its original interview-practice workspace.
 

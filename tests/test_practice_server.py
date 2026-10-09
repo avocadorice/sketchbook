@@ -136,3 +136,23 @@ def test_serves_only_static_pages(running):
 )
 def test_only_local_network_clients_are_answered(address, allowed):
     assert practice.private_client(address) is allowed
+
+
+def test_old_editor_cannot_drop_problem_relationships(running):
+    _, port = running
+    _, first = save(port, None, {**PROJECT, "schemaVersion": 2, "problems": [{"id": "p", "title": "Example"}]})
+    response, result = save(port, first["revision"])
+    assert response.status == 400
+    assert "Reload" in result["error"]
+
+
+def test_tutor_image_endpoint_serves_only_png_ids(running):
+    root, port = running
+    ident = 'a' * 32
+    raw = b'\x89PNG\r\n\x1a\nexample'
+    (root / '.local/tutor' / (ident + '.png')).write_bytes(raw)
+    response, result = call(port, 'GET', '/static/practice/api/tutor/image/' + ident)
+    assert response.status == 200 and result == raw
+    assert response.getheader('Content-Type') == 'image/png'
+    response, _ = call(port, 'GET', '/static/practice/api/tutor/image/not-a-png')
+    assert response.status == 400

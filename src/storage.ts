@@ -1,12 +1,13 @@
 import type { BinaryFiles } from "@excalidraw/excalidraw/types";
 import { checkpoint, createAttempt, normalizeScene, parseAttempt, type Attempt, type Scene } from "./history";
+import type { Problem } from "./problems";
 import type { Drafts } from "./drafts";
 
 export type Draft = { id?: string; cleanSlate?: boolean; index: number | null; scene: Scene; title: string; notes: string };
 export type Timing = { enabled: boolean; chaptersMs: number[]; draftMs: number };
 /** An earlier attempt kept by "Start a fresh attempt"; images stay in the shared files map. */
-export type PastAttempt = { drawingId?: string; attemptNumber?: number; savedAt: number; attempt: Attempt; draft: Draft; timing?: Timing; drafts?: Drafts };
-export type Project = { drawingId?: string; attemptNumber?: number; attempt: Attempt; draft: Draft; files: BinaryFiles; timing?: Timing; drafts?: Drafts; past?: PastAttempt[] };
+export type PastAttempt = { problemId?: string; drawingId?: string; attemptNumber?: number; savedAt: number; attempt: Attempt; draft: Draft; timing?: Timing; drafts?: Drafts };
+export type Project = { schemaVersion?: 2; problems?: Problem[]; problemId?: string; drawingId?: string; attemptNumber?: number; attempt: Attempt; draft: Draft; files: BinaryFiles; timing?: Timing; drafts?: Drafts; past?: PastAttempt[] };
 type SavedProject = { project: Project; revision: string };
 const databaseName = "nexo-practice-v1";
 const storeName = "projects";
@@ -14,7 +15,7 @@ const key = "current";
 
 export class StorageConflictError extends Error {
   override name = "StorageConflictError";
-  constructor() { super("This practice attempt changed in another tab or on another device. Reload to use its saved version; your current drawing has not overwritten it."); }
+  constructor() { super("This practice attempt changed in another tab or on another device. Reload to use its saved version; your current sketch has not overwritten it."); }
 }
 
 // Served by scripts/practice_server.py, the attempt lives on the host Mac and every device shares it.
@@ -40,7 +41,7 @@ function parseProject(value: unknown): Project {
   if ((draft.index !== null && (!Number.isInteger(draft.index)
     || (draft.index as number) < 0 || (draft.index as number) >= attempt.chapters.length))
     || typeof draft.title !== "string" || typeof draft.notes !== "string") {
-    throw new Error("The saved drawing must name an existing checkpoint or the next one.");
+    throw new Error("The saved sketch must name an existing checkpoint or the next one.");
   }
   for (const [id, file] of Object.entries(value.files)) {
     if (!id || !object(file) || file.id !== id || typeof file.mimeType !== "string"
@@ -81,13 +82,17 @@ function parseProject(value: unknown): Project {
         throw new Error("A saved past attempt is invalid.");
       }
       // A past attempt has the same shape as the current one, minus the shared images.
-      const { drawingId, attemptNumber, attempt: pastAttempt, draft: pastDraft, timing: pastTiming, drafts: pastDrafts } = parseProject({ ...entry, files: {} });
-      return { ...(drawingId ? { drawingId } : {}), ...(attemptNumber ? { attemptNumber } : {}), savedAt: entry.savedAt, attempt: pastAttempt, draft: pastDraft,
+      const { problemId, drawingId, attemptNumber, attempt: pastAttempt, draft: pastDraft, timing: pastTiming, drafts: pastDrafts } = parseProject({ ...entry, files: {} });
+      return { ...(problemId ? { problemId } : {}), ...(drawingId ? { drawingId } : {}), ...(attemptNumber ? { attemptNumber } : {}), savedAt: entry.savedAt, attempt: pastAttempt, draft: pastDraft,
         ...(pastTiming ? { timing: pastTiming } : {}), ...(pastDrafts ? { drafts: pastDrafts } : {}) };
     });
   }
   if (value.drawingId !== undefined && (typeof value.drawingId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(value.drawingId))) throw new Error("Invalid drawing ID.");
+  if (value.problems !== undefined && (!Array.isArray(value.problems) || value.problems.some(p => !object(p) || typeof p.id !== "string" || typeof p.title !== "string"))) throw new Error("Invalid practice problems.");
   return {
+    ...(value.schemaVersion === 2 ? { schemaVersion: 2 as const } : {}),
+    ...(Array.isArray(value.problems) ? { problems: structuredClone(value.problems) as Problem[] } : {}),
+    ...(typeof value.problemId === "string" ? { problemId: value.problemId } : {}),
     ...(typeof value.drawingId === "string" ? { drawingId: value.drawingId } : {}),
     ...(typeof value.attemptNumber === "number" && Number.isInteger(value.attemptNumber) && value.attemptNumber > 0 ? { attemptNumber: value.attemptNumber } : {}),
     attempt,
@@ -154,11 +159,11 @@ export async function loadProject(): Promise<SavedProject | null> {
 }
 
 /** Read an attempt exported from browser storage, either {revision, project} or a bare project. */
-export function parseImport(text: string, title = "Imported drawing"): Project {
+export function parseImport(text: string, title = "Imported sketch"): Project {
   const value: unknown = JSON.parse(text);
   if (object(value) && value.type === "excalidraw" && Array.isArray(value.elements)) {
     const scene = normalizeScene({ elements: value.elements.filter(element => !element.isDeleted), backgroundColor: object(value.appState) && typeof value.appState.viewBackgroundColor === "string" ? value.appState.viewBackgroundColor : "#ffffff" });
-    return parseProject({ attempt: checkpoint(createAttempt(title), scene, "Imported drawing", ""), draft: { index: null, scene, title: "", notes: "" }, files: value.files ?? {} });
+    return parseProject({ attempt: checkpoint(createAttempt(title), scene, "Imported sketch", ""), draft: { index: null, scene, title: "", notes: "" }, files: value.files ?? {} });
   }
   return parseProject(object(value) && "project" in value ? value.project : value);
 }

@@ -62,6 +62,8 @@ class ProjectStore:
             saved = self._read()
             if (saved["revision"] if saved else None) != expected:
                 raise Conflict
+            if saved and saved["project"].get("schemaVersion") == 2 and project.get("schemaVersion") != 2:
+                raise ValueError("Reload this app to use Practice Problems before saving.")
             revision = str(uuid.uuid4())
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if saved:
@@ -149,6 +151,16 @@ class PracticeHandler(SimpleHTTPRequestHandler):
                 self.reply(200, self.tutor.public(ident))
             except ValueError as error:
                 self.reply(400, {"error": str(error)})
+        elif urlsplit(self.path).path.startswith("/static/practice/api/tutor/image/"):
+            ident = urlsplit(self.path).path.rsplit("/", 1)[-1]
+            if len(ident) != 32 or any(c not in "0123456789abcdef" for c in ident):
+                self.reply(400, {"error": "Invalid image ID."}); return
+            path = self.tutor.root / (ident + ".png")
+            if not path.is_file():
+                self.reply(404, {"error": "Image not found."}); return
+            data = path.read_bytes()
+            self.send_response(200); self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
         elif self.path == API:
             saved = self.store.load()
             if saved:
@@ -260,7 +272,7 @@ def main() -> None:
     args = parser.parse_args()
     httpd = server(ROOT, args.host, args.port)
     page = f"http://<this-mac>:{args.port}/static/practice/index.html"
-    print(f"Sketchbook: {page} (Ctrl+C to stop)")
+    print(f"System Design Practice: {page} (Ctrl+C to stop)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

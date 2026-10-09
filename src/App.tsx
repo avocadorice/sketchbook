@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Excalidraw, MainMenu, restoreElements, exportToBlob, exportToCanvas, getCommonBounds } from "@excalidraw/excalidraw";
+import { Excalidraw, MainMenu, restoreElements } from "@excalidraw/excalidraw";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import { checkpoint, createAttempt, deleteChapter, sceneAt, updateChapter, normalizeScene, type Scene, moveChapter, skippedChanges } from "./history";
 import { loadProject, parseImport, saveProject, storageLocation, type Project, type Timing } from "./storage";
 import { tutorContext, matchesSearch, type Focus } from "./tutorContext";
+import { organizeProblems, nextAttemptNumber, renameProblem } from "./problems";
+import { captureViewport, visibleRegions, screenToScene, sceneToScreen, type View } from "./viewport";
 import { draftKey, draftsAfterDelete, rekeyDrafts } from "./drafts";
 
 import { TutorPanel } from "./TutorPanel";
 
-const prompt = "Untitled drawing";
+const prompt = "Untitled problem";
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 function sceneFrom(elements: readonly ExcalidrawElement[], state: AppState): Scene {
   return normalizeScene({
@@ -20,9 +22,9 @@ function sceneFrom(elements: readonly ExcalidrawElement[], state: AppState): Sce
     backgroundColor: state.viewBackgroundColor,
   });
 }
-function freshProject(): Project {
-  const attempt = createAttempt(prompt);
-  return { drawingId: crypto.randomUUID(), attemptNumber: 1, attempt, draft: { id: crypto.randomUUID(), index: null, scene: sceneAt(attempt, -1), title: "", notes: "" }, files: {} };
+function freshProject(problemId: string = crypto.randomUUID(), title = prompt): Project {
+  const attempt = createAttempt(title);
+  return { schemaVersion: 2, problemId, problems: [{ id: problemId, title }], drawingId: crypto.randomUUID(), attemptNumber: 1, attempt, draft: { id: crypto.randomUUID(), index: null, scene: sceneAt(attempt, -1), title: "", notes: "" }, files: {} };
 }
 function timingOf(project: Project): Timing {
   return project.timing ?? { enabled: false, chaptersMs: project.attempt.chapters.map(() => 0), draftMs: 0 };
@@ -46,19 +48,25 @@ function canvasElements(scene: Scene): ExcalidrawElement[] {
 export function App(): React.JSX.Element {
   const [loaded, setLoaded] = useState<{ project: Project; revision: string | null }>();
   const [error, setError] = useState("");
-  useEffect(() => { void loadProject().then(value => setLoaded(value ?? { project: freshProject(), revision: null })).catch(error => setError(String(error))); }, []);
-  if (error) return <main className="load-error"><h1>Sketchbook could not open</h1><p role="alert">{error}</p><p>Your stored attempt has not been replaced. Close other practice tabs and reload.</p></main>;
-  if (!loaded) return <main className="load-error">Opening your sketchbook…</main>;
+  useEffect(() => { void loadProject().then(async value => {
+    if (!value) { setLoaded({ project: freshProject(), revision: null }); return; }
+    const project = organizeProblems(value.project);
+    const revision = same(project, value.project) ? value.revision : await saveProject(project, value.revision);
+    setLoaded({ project, revision });
+  }).catch(error => setError(String(error))); }, []);
+  if (error) return <main className="load-error"><h1>System Design Practice could not open</h1><p role="alert">{error}</p><p>Your stored attempt has not been replaced. Close other practice tabs and reload.</p></main>;
+  if (!loaded) return <main className="load-error">Opening your practice problems…</main>;
   return <Practice initial={loaded.project} initialRevision={loaded.revision} />;
 }
 
 function Practice({ initial, initialRevision }: { initial: Project; initialRevision: string | null }): React.JSX.Element {
   const api = useRef<ExcalidrawImperativeAPI | null>(null);
-  const [showLibrary, setShowLibrary] = useState(true);
-  const [showTutor, setShowTutor] = useState(true);
+  const [showLibrary, setShowLibrary] = useState(localStorage.getItem("practice-problems-pane") !== "hidden");
+  const [showTutor, setShowTutor] = useState(localStorage.getItem("practice-tutor-pane") !== "hidden");
   const [search, setSearch] = useState("");
   const [undo, setUndo] = useState<{ project: Project; label: string } | null>(null);
-  const [focus, setFocus] = useState<Focus | null>(null);
+  const [focuses, setFocuses] = useState<Focus[]>([]);
+  const [view, setView] = useState<View>({ scrollX: 0, scrollY: 0, zoom: 1, width: 1, height: 1 });
   const [focusing, setFocusing] = useState(false);
   const focusStart = useRef<{ x: number; y: number } | null>(null);
   const [focusScreen, setFocusScreen] = useState<Focus | null>(null);
@@ -107,20 +115,29 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     current.current = next; setProject(next); setMessage(""); setUndo(null);
     void persist(next).catch(() => { /* The visible save error keeps the draft available. */ });
   }, [persist]);
+  useEffect(() => { localStorage.setItem("practice-problems-pane", showLibrary ? "visible" : "hidden"); }, [showLibrary]);
+  useEffect(() => { localStorage.setItem("practice-tutor-pane", showTutor ? "visible" : "hidden"); }, [showTutor]);
+  useEffect(() => {
+    const key = (e: KeyboardEvent): void => {
+      if ((e.target as HTMLElement)?.closest('input,textarea,select,[contenteditable=true]')) return;
+      if (e.key === "Escape") { focusStart.current = null; setFocusScreen(null); setFocusing(false); return; }
+      setFocusing(e.altKey && e.shiftKey);
+    };
+    const blur = (): void => { focusStart.current = null; setFocusScreen(null); setFocusing(false); };
+    window.addEventListener("keydown", key); window.addEventListener("keyup", key); window.addEventListener("blur", blur);
+    return () => { window.removeEventListener("keydown", key); window.removeEventListener("keyup", key); window.removeEventListener("blur", blur); };
+  }, []);
   const onCanvasChange = useCallback((elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles): void => {
     if (loadingCanvas.current) return;
-    if (focus && drawingBox.current) {
-      const nextBox = { x: (focus.x + appState.scrollX) * appState.zoom.value, y: (focus.y + appState.scrollY) * appState.zoom.value,
-        width: focus.width * appState.zoom.value, height: focus.height * appState.zoom.value };
-      setFocusScreen(old => same(old, nextBox) ? old : nextBox);
-    }
+    const nextView = { scrollX: appState.scrollX, scrollY: appState.scrollY, zoom: appState.zoom.value, width: appState.width, height: appState.height };
+    setView(old => same(old, nextView) ? old : nextView);
     const old = current.current; const scene = sceneFrom(elements, appState);
     const allFiles = { ...old.files, ...files };
     if (same(scene, old.draft.scene) && same(allFiles, old.files)) return;
     change({ ...old, files: allFiles, draft: { ...old.draft, scene } });
-  }, [change, focus]);
+  }, [change]);
   const loadCanvas = (next: Project): void => {
-    setFocus(null); setFocusScreen(null); setFocusing(false); setUndo(null);
+    setFocuses([]); setFocusScreen(null); setFocusing(false); setUndo(null);
     loadingCanvas.current = true; current.current = next; setProject(next); setCanvasKey(value => value + 1);
   };
   const onReady = useCallback((instance: ExcalidrawImperativeAPI): void => {
@@ -213,7 +230,7 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     let next: Project;
     if (position === null) {
       const [first, ...rest] = old.past ?? [];
-      next = first ? { ...first, files: old.files, past: rest } : { ...freshProject(), attemptNumber: (old.attemptNumber ?? 1) + 1, files: old.files };
+      next = first ? { ...first, schemaVersion: 2, problems: old.problems, files: old.files, past: rest } : { ...freshProject(old.problemId, old.attempt.prompt), problems: old.problems, files: old.files };
     } else next = { ...old, past: old.past?.filter((_, i) => i !== position) };
     setBusy(true);
     try { await persist(next); loadCanvas(next); setUndo({ project: old, label: "Attempt deleted" }); }
@@ -261,16 +278,18 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     catch { loadingCanvas.current = false; }
     finally { setBusy(false); }
   };
-  // A fresh attempt never deletes work: the current one moves to Drawing library and can be reopened.
+  // A fresh attempt never deletes work: the current one moves to Practice Problems and can be reopened.
   const shelved = (project: Project): Project["past"] => {
-    const { drawingId, attemptNumber, attempt, draft, timing, drafts } = project;
+    const { problemId, drawingId, attemptNumber, attempt, draft, timing, drafts } = project;
     const empty = !attempt.chapters.length && !draft.scene.elements.length && !draft.title && !draft.notes && (attempt.prompt === prompt || !attempt.prompt);
-    return empty && !drawingId ? project.past ?? [] : [{ drawingId, attemptNumber, savedAt: Date.now(), attempt, draft, ...(timing ? { timing } : {}), ...(drafts ? { drafts } : {}) }, ...(project.past ?? [])];
+    return empty && !drawingId ? project.past ?? [] : [{ problemId, drawingId, attemptNumber, savedAt: Date.now(), attempt, draft, ...(timing ? { timing } : {}), ...(drafts ? { drafts } : {}) }, ...(project.past ?? [])];
   };
-  const resetAttempt = async (): Promise<void> => {
+  const resetAttempt = async (newProblem = false): Promise<void> => {
     if (busy) return;
     const old = current.current;
-    const next: Project = { ...freshProject(), attemptNumber: Math.max(old.attemptNumber ?? 1, ...(old.past ?? []).map(p => p.attemptNumber ?? 0)) + 1, files: old.files, past: shelved(old), timing: { enabled: timingOf(old).enabled, chaptersMs: [], draftMs: 0 } };
+    const fresh = newProblem ? freshProject() : freshProject(old.problemId, old.attempt.prompt);
+    const next: Project = { ...fresh, problems: newProblem ? [...(old.problems ?? []), ...fresh.problems!] : old.problems,
+      attemptNumber: newProblem ? 1 : nextAttemptNumber(old, old.problemId!), files: old.files, past: shelved(old), timing: { enabled: timingOf(old).enabled, chaptersMs: [], draftMs: 0 } };
     setBusy(true); loadingCanvas.current = true;
     try { await persist(next); loadCanvas(next); setMessage("New attempt ready. Your previous attempt is in Attempts."); }
     catch { loadingCanvas.current = false; }
@@ -282,9 +301,9 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     const rest = (old.past ?? []).filter((_, i) => i !== position);
     const { savedAt: _savedAt, ...restored } = chosen;
     const past = shelved({ ...old, past: rest }) ?? [];
-    const next: Project = { files: old.files, ...restored, past };
+    const next: Project = { schemaVersion: 2, problems: old.problems, files: old.files, ...restored, past };
     setBusy(true); loadingCanvas.current = true;
-    try { await persist(next); loadCanvas(next); setMessage(`Reopened the attempt from ${new Date(chosen.savedAt).toLocaleString()}.${past.length > rest.length ? " The one you were on is under Drawing library." : ""}`); }
+    try { await persist(next); loadCanvas(next); setMessage(`Reopened the attempt from ${new Date(chosen.savedAt).toLocaleString()}.${past.length > rest.length ? " The one you were on is under Practice Problems." : ""}`); }
     catch { loadingCanvas.current = false; }
     finally { setBusy(false); }
   };
@@ -294,52 +313,40 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     let imported: Project;
     try { imported = parseImport(await file.text(), file.name.replace(/\.(excalidraw|json)$/i, "")); }
     catch (error) { setMessage(`Not imported: ${error instanceof Error ? error.message : String(error)}`); return; }
-    imported.drawingId = crypto.randomUUID();
-    imported.attempt.chapters = imported.attempt.chapters.map(c => ({ ...c, id: crypto.randomUUID() }));
-    imported.attemptNumber = Math.max(current.current.attemptNumber ?? 0, ...(current.current.past ?? []).map(p => p.attemptNumber ?? 0)) + 1;
-    imported.past = imported.past?.map((entry, i) => ({ ...entry, drawingId: crypto.randomUUID(), attemptNumber: imported.attemptNumber! + i + 1, attempt: { ...entry.attempt, chapters: entry.attempt.chapters.map(c => ({ ...c, id: crypto.randomUUID() })) } }));
+    imported = organizeProblems(imported);
+    const problemIds = new Map(imported.problems!.map(p => [p.id, crypto.randomUUID()]));
+    imported.problems = imported.problems!.map(p => ({ ...p, id: problemIds.get(p.id)! }));
+    for (const entry of [imported, ...(imported.past ?? [])]) {
+      entry.problemId = problemIds.get(entry.problemId!)!;
+      entry.drawingId = crypto.randomUUID();
+      entry.attempt.chapters = entry.attempt.chapters.map(c => ({ ...c, id: crypto.randomUUID() }));
+      entry.draft.id = entry.draft.index === null ? crypto.randomUUID() : entry.attempt.chapters[entry.draft.index]?.id;
+      for (const [key, draft] of Object.entries(entry.drafts ?? {})) draft.id = key === 'next' ? crypto.randomUUID() : entry.attempt.chapters[Number(key)]?.id;
+    }
     const old = current.current;
-    // The current attempt is kept under Drawing library, alongside any the file brought.
-    const next: Project = { ...imported, files: { ...old.files, ...imported.files }, past: [...(shelved(old) ?? []), ...(imported.past ?? [])] };
+    const next: Project = { ...imported, problems: [...(old.problems ?? []), ...imported.problems], files: { ...old.files, ...imported.files }, past: [...(shelved(old) ?? []), ...(imported.past ?? [])] };
     setBusy(true); loadingCanvas.current = true;
-    try { await persist(next); loadCanvas(next); setMessage(`Imported ${chapters(next.attempt.chapters.length)} from ${file.name}. Your previous attempt is under Drawing library.`); }
+    try { await persist(next); loadCanvas(next); setMessage(`Imported ${chapters(next.attempt.chapters.length)} from ${file.name}. Your previous attempt is under Practice Problems.`); }
     catch { loadingCanvas.current = false; }
     finally { setBusy(false); }
   };
   const exportLibrary = (): void => {
     const url = URL.createObjectURL(new Blob([JSON.stringify(current.current, null, 2)], { type: "application/json" }));
-    const link = document.createElement("a"); link.href = url; link.download = "sketchbook-library.json"; link.click();
+    const link = document.createElement("a"); link.href = url; link.download = "practice-problems.json"; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   const capture = async () => {
-    if (!current.current.drawingId) {
-      const next = { ...current.current, drawingId: crypto.randomUUID() };
-      await persist(next); current.current = next; setProject(next);
-    }
-    await persist(current.current);
-    const instance = api.current;
-    const context = tutorContext(current.current, focus);
-    const ids = new Set(context.scene.elements.map(e => e.id));
-    const elements = (instance?.getSceneElements() ?? []).filter(e => ids.has(e.id));
-    let image: string | null = null;
-    if (elements.length) {
-      const opts = { elements, files: current.current.files, appState: { ...instance!.getAppState(), exportWithDarkMode: true, exportBackground: true }, maxWidthOrHeight: 2000, exportPadding: 0 };
-      if (focus) {
-        const canvas = await exportToCanvas(opts);
-        const [x1, y1, x2, y2] = getCommonBounds(elements);
-        const scaleX = canvas.width / Math.max(1, x2 - x1), scaleY = canvas.height / Math.max(1, y2 - y1);
-        const cropped = document.createElement("canvas");
-        const scale = Math.min(1, 1600 / Math.max(focus.width, focus.height));
-        cropped.width = Math.max(1, Math.round(focus.width * scale)); cropped.height = Math.max(1, Math.round(focus.height * scale));
-        const ctx = cropped.getContext("2d")!; ctx.fillStyle = "#121212"; ctx.fillRect(0, 0, cropped.width, cropped.height);
-        ctx.drawImage(canvas, (focus.x - x1) * scaleX, (focus.y - y1) * scaleY, focus.width * scaleX, focus.height * scaleY, 0, 0, cropped.width, cropped.height);
-        image = cropped.toDataURL("image/png");
-      } else {
-        const blob = await exportToBlob({ ...opts, mimeType: "image/png" });
-        image = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = reject; reader.readAsDataURL(blob); });
-      }
-    }
-    return { id: current.current.drawingId!, image, context };
+    if (!api.current || !drawingBox.current) throw new Error("The canvas is not ready.");
+    // Freeze the visible pixels and scene together, before waiting for network persistence.
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const snapshot = current.current;
+    const state = api.current.getAppState();
+    const viewport = { scrollX: state.scrollX, scrollY: state.scrollY, zoom: state.zoom.value, width: state.width, height: state.height };
+    const image = captureViewport(drawingBox.current, focuses, viewport);
+    const context = { ...tutorContext(snapshot, visibleRegions(focuses, viewport)), problemId: snapshot.problemId, attemptNumber: snapshot.attemptNumber,
+      captureMode: focuses.length ? "focus-regions" : "visible-viewport", viewport };
+    await persist(snapshot);
+    return { id: snapshot.drawingId!, image, context };
   };
   useEffect(() => {
     window.sketchbookFlushDraft = async () => { if (writer.current) await writer.current; if (failure.current) throw failure.current; };
@@ -353,17 +360,29 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     const bounds = event.currentTarget.getBoundingClientRect(); const end = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
     const box = { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(end.x - start.x), height: Math.abs(end.y - start.y) };
     const state = api.current.getAppState();
-    if (box.width > 8 && box.height > 8) {
-      setFocus({ x: box.x / state.zoom.value - state.scrollX, y: box.y / state.zoom.value - state.scrollY, width: box.width / state.zoom.value, height: box.height / state.zoom.value }); setFocusScreen(box);
-    }
-    focusStart.current = null; setFocusing(false);
+    if (box.width > 8 && box.height > 8) setFocuses(old => [...old, screenToScene(box, { ...view, scrollX: state.scrollX, scrollY: state.scrollY, zoom: state.zoom.value })]);
+    focusStart.current = null; setFocusScreen(null); setFocusing(event.altKey && event.shiftKey);
   };
+  const entries = [{ entry: project, position: null as number | null }, ...(project.past ?? []).map((entry, position) => ({ entry, position }))];
+  const groups = (project.problems ?? []).map(problem => ({ problem, entries: entries.filter(({ entry }) => entry.problemId === problem.id && matchesSearch(entry, search)).sort((a, b) => (a.entry.attemptNumber ?? 1) - (b.entry.attemptNumber ?? 1)) })).filter(g => g.entries.length);
   return <div className="practice-app">
-    <header className="practice-header"><div><h1>Sketchbook <span className="hint">· Attempt #{project.attemptNumber ?? 1}</span></h1><label htmlFor="drawing-title">Drawing title</label><input id="drawing-title" maxLength={2000} disabled={busy} value={attempt.prompt} placeholder="Untitled drawing" onChange={event => change({ ...current.current, attempt: { ...current.current.attempt, prompt: event.target.value } })} /></div><nav><button aria-pressed={showLibrary} onClick={() => setShowLibrary(!showLibrary)}>Attempts</button><button aria-pressed={showTutor} onClick={() => setShowTutor(!showTutor)}>Tutor</button></nav></header>
-    <main className="workspace" style={{ gridTemplateColumns: `${showLibrary ? "clamp(190px,20vw,260px) " : ""}minmax(0,1fr)${showTutor ? " clamp(300px,29vw,370px)" : ""}` }}>
-      {showLibrary && <aside className="chapter-panel navigator" aria-label="Attempts and checkpoints">
-        <label htmlFor="library-search">Search sketchbooks</label><input id="library-search" type="search" placeholder="Title or diagram text…" value={search} onChange={e => setSearch(e.target.value)} />
-        <h2>Attempt #{project.attemptNumber ?? 1}</h2>
+    <header className="practice-header">
+      <div className="app-identity"><h1>System Design Practice</h1><input aria-label="Practice problem title" maxLength={2000} disabled={busy} value={attempt.prompt} placeholder="Untitled problem" onChange={e => change(renameProblem(current.current, e.target.value))} /></div>
+      <div className="header-search"><span aria-hidden="true">⌕</span><input aria-label="Search practice problems" type="search" placeholder="Search problems or sketch text" value={search} onChange={e => { setSearch(e.target.value); if (e.target.value) setShowLibrary(true); }} /></div>
+      <nav><button aria-pressed={showLibrary} onClick={() => setShowLibrary(!showLibrary)}>Problems</button><button aria-pressed={showTutor} onClick={() => setShowTutor(!showTutor)}>Tutor</button></nav>
+    </header>
+    <main className="workspace" style={{ gridTemplateColumns: `${showLibrary ? "clamp(200px,20vw,270px) " : ""}minmax(0,1fr)${showTutor ? " clamp(300px,27vw,370px)" : ""}` }}>
+      {showLibrary && <aside className="chapter-panel navigator" aria-label="Practice problems and attempts">
+        <div className="pane-heading"><h2>Practice Problems</h2><button aria-label="Hide problems pane" onClick={() => setShowLibrary(false)}>×</button></div>
+        <button className="new-attempt" disabled={busy} onClick={() => void resetAttempt(true)}>＋ New Problem</button>
+        <div className="problem-list">{groups.map(({ problem, entries }) => <details key={problem.id} open={problem.id === project.problemId || !!search}>
+          <summary>{problem.title || "Untitled problem"}</summary>
+          <ol className="attempt-list">{entries.map(({ entry, position }) => <li key={entry.drawingId} className={position === null ? "current-attempt" : ""}>
+            <button className="attempt-open" aria-current={position === null ? "page" : undefined} disabled={busy || position === null} onClick={() => void openPast(position!)}>Attempt #{entry.attemptNumber ?? 1}</button>
+            <button aria-label={`Delete attempt ${entry.attemptNumber ?? 1} of ${problem.title}`} disabled={busy} onClick={() => void deleteAttempt(position)}>×</button>
+          </li>)}</ol>
+        </details>)}{!groups.length && <p className="hint">No matching problems.</p>}</div>
+        <div className="checkpoint-heading"><h3>Attempt #{project.attemptNumber ?? 1}</h3><button disabled={busy} onClick={() => void resetAttempt()}>＋ New Attempt</button></div>
         <ol className="chapters">{attempt.chapters.map((chapter, index) => <li key={chapter.id ?? index} className={draft.index === index ? "selected-checkpoint" : ""}>
           <button className="checkpoint-number" disabled={busy} aria-label={`Open checkpoint ${index + 1}`} aria-current={draft.index === index ? "step" : undefined} onClick={() => void switchChapter(index)}>{index + 1}</button>
           <input aria-label={`Checkpoint ${index + 1} title`} maxLength={200} value={chapter.title} onChange={e => renameCheckpoint(index, e.target.value)} />
@@ -376,22 +395,17 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
         <details className="create-checkpoint"><summary>Create Checkpoint</summary><button disabled={busy} onClick={() => void createCheckpoint(false)}>Continue from latest</button><button disabled={busy} onClick={() => void createCheckpoint(true)}>Start with clean slate</button></details>
         {dirtyNow && <button className="discard-draft" disabled={busy} onClick={() => void discardDraft()}>Discard draft</button>}
         {undo && <div className="undo-delete" role="status">{undo.label}. <button onClick={() => void undoDelete()} disabled={busy}>Undo</button></div>}
-        <h3>Attempts</h3><button className="new-attempt" disabled={busy} onClick={() => void resetAttempt()}>＋ New Attempt</button>
-        <ol className="attempt-list">
-          {matchesSearch(project, search) && <li className="current-attempt"><div><strong>Attempt #{project.attemptNumber ?? 1}</strong><small>{attempt.prompt || "Untitled drawing"}</small><em>Current</em></div><button aria-label="Delete current attempt" onClick={() => void deleteAttempt(null)} disabled={busy}>×</button></li>}
-          {project.past?.map((past, i) => matchesSearch(past, search) && <li key={past.drawingId ?? past.savedAt}><div><strong>Attempt #{past.attemptNumber ?? i + 1}</strong><small>{past.attempt.prompt || "Untitled drawing"}</small></div><button disabled={busy} aria-label={`Open attempt ${past.attemptNumber ?? i + 1}`} onClick={() => void openPast(i)}>Open</button><button aria-label={`Delete attempt ${past.attemptNumber ?? i + 1}`} disabled={busy} onClick={() => void deleteAttempt(i)}>×</button></li>)}
-        </ol>
-        <label className="import-attempt">Import drawing or library<input type="file" accept="application/json,.json,.excalidraw" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importAttempt(file); }} /></label><button disabled={busy} onClick={exportLibrary}>Export whole library</button>
+        <label className="import-attempt">Import sketch or problems<input type="file" accept="application/json,.json,.excalidraw" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importAttempt(file); }} /></label><button disabled={busy} onClick={exportLibrary}>Export all problems</button>
       </aside>}
       <section ref={drawingBox} className="drawing" aria-label="Design canvas" aria-busy={busy}>
         <Excalidraw theme="dark" aiEnabled={false} key={canvasKey} excalidrawAPI={onReady} onChange={onCanvasChange} initialData={{ elements: canvasElements(draft.scene), appState: { viewBackgroundColor: draft.scene.backgroundColor }, files: project.files }} viewModeEnabled={busy}>
           <MainMenu><MainMenu.DefaultItems.LoadScene /><MainMenu.DefaultItems.SaveToActiveFile /><MainMenu.DefaultItems.Export /><MainMenu.DefaultItems.ClearCanvas /><MainMenu.Separator /><MainMenu.DefaultItems.ChangeCanvasBackground /></MainMenu>
         </Excalidraw>
-        <div className="focus-controls"><button aria-pressed={focusing} onClick={() => setFocusing(!focusing)}>{focusing ? "Drag a tutor focus box…" : "Focus area"}</button>{focus && <button onClick={() => { setFocus(null); setFocusScreen(null); }}>Clear focus</button>}</div>
-        {focusScreen && <div className="focus-box" style={{ left: focusScreen.x, top: focusScreen.y, width: focusScreen.width, height: focusScreen.height }}><span>Tutor focus</span></div>}
-        {focusing && <div className="focus-picker" aria-label="Drag tutor focus area" onPointerDown={e => { const box = e.currentTarget.getBoundingClientRect(); focusStart.current = { x: e.clientX - box.left, y: e.clientY - box.top }; e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={e => { const start = focusStart.current; if (!start) return; const b = e.currentTarget.getBoundingClientRect(); const x = e.clientX - b.left, y = e.clientY - b.top; setFocusScreen({ x: Math.min(x, start.x), y: Math.min(y, start.y), width: Math.abs(x - start.x), height: Math.abs(y - start.y) }); }} onPointerUp={finishFocus} />}
+        <div className="focus-overlays">{focuses.map((focus, i) => { const box = sceneToScreen(focus, view); return <div key={i} className="focus-box" style={{ left: box.x, top: box.y, width: box.width, height: box.height }}><span>Focus {i + 1} <button aria-label={`Remove focus ${i + 1}`} onClick={() => setFocuses(old => old.filter((_, n) => n !== i))}>×</button></span></div>; })}
+        {focusScreen && <div className="focus-box selecting" style={{ left: focusScreen.x, top: focusScreen.y, width: focusScreen.width, height: focusScreen.height }} />}</div>
+        {(focusing || focusStart.current) && <div className="focus-picker" aria-label="Drag tutor focus area" onPointerDown={e => { const box = e.currentTarget.getBoundingClientRect(); focusStart.current = { x: e.clientX - box.left, y: e.clientY - box.top }; e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={e => { const start = focusStart.current; if (!start) return; const b = e.currentTarget.getBoundingClientRect(); const x = e.clientX - b.left, y = e.clientY - b.top; setFocusScreen({ x: Math.min(x, start.x), y: Math.min(y, start.y), width: Math.abs(x - start.x), height: Math.abs(y - start.y) }); }} onPointerUp={finishFocus} />}
       </section>
-      {showTutor && <TutorPanel key={project.drawingId ?? "legacy"} drawingId={project.drawingId} capture={capture} contextLabel={`Checkpoint ${(draft.index ?? attempt.chapters.length) + 1}${focus ? " · focus area" : " · full canvas"}`} />}
+      {showTutor && <TutorPanel key={project.drawingId ?? "legacy"} drawingId={project.drawingId} capture={capture} onHide={() => setShowTutor(false)} startFocus={() => setFocusing(true)} clearFocus={() => setFocuses([])} hasFocus={!!focuses.length} contextLabel={`Checkpoint ${(draft.index ?? attempt.chapters.length) + 1} · ${focuses.length ? `${focuses.length} focus region${focuses.length === 1 ? "" : "s"}` : "Visible canvas"}`} />}
     </main>
     <footer className="workspace-status"><span>{saveStatus}</span>{message && <span>{message}</span>}{saveError && <span role="alert">{saveError} <button onClick={() => void persist(current.current).catch(() => {})}>Retry saving</button></span>}</footer>
   </div>;
