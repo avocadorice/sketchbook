@@ -10,7 +10,7 @@
     "dev": "vite --host 127.0.0.1",
     "check": "tsc --noEmit",
     "test": "node --import tsx --test src/*.test.ts",
-    "build": "tsc --noEmit && vite build"
+    "build": "tsc --noEmit && vite build --configLoader runner"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "0.18.1",

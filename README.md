@@ -1,6 +1,12 @@
-# System Design Practice
+# Interview Pad: System Design
+
+This directory is the **System Design** component of [Interview Pad](../README.md), alongside its LeetCode mode. The canonical project is `/Users/bhsiao/AI/interviewpad/`, with this component in `system-design/`. Follow the [parent README](../README.md#installed-mac-app-and-tailnet) to launch the installed app, or start and build the combined app from `../`; use its top-bar mode selector. Existing data and tutor history remain in this directory. The standalone commands below are retained for component development and legacy compatibility.
 
 A dark Excalidraw workspace for working through system designs. Organize practice problems into numbered attempts, edit ordered checkpoints, and ask an AI tutor about a specific part of your diagram without scattering the conversation across providers.
+
+In the Problems pane, add comma-separated company names under **Company tags for this problem** and click **Save tags**. Tags are shared across the problem's attempts, appear in the problem list, and are included in exports. Use **Filter by company** or search a company name to find tagged problems.
+
+If another window saves first, **Retry saving** fetches the latest library and recovers your changes. Conflicting edits to the same drawing are kept as separate attempts; the saved attempt retains its tutor conversation, and the recovered copy starts a new one. **Export recovery backup** also saves everything currently open to a JSON file.
 
 - **Practice Problems and Tutor stay visible together**, with independent show/hide controls.
 - **Search** problem titles and text inside any saved checkpoint or draft.
@@ -9,7 +15,7 @@ A dark Excalidraw workspace for working through system designs. Organize practic
 - **One conversation per attempt** survives agent switches and device changes. A question at checkpoint 3 includes checkpoints 1–2; later checkpoint scenes and conversations are excluded. The full transcript remains visible.
 - **Native macOS app**, or use a browser over your Tailscale network.
 
-## Run
+## Standalone component
 
 Requires Node 20.19+ or 22.12+, Python 3.10+, and macOS for the native wrapper and subscription CLI adapters.
 
@@ -27,7 +33,9 @@ tailscale serve --bg http://localhost:8095
 
 The server defaults to listening on all interfaces for LAN compatibility; `--host 127.0.0.1` limits access to loopback and the Tailscale proxy. It accepts loopback, private-network and tailnet clients. JSON mutations require a custom header and do not allow cross-origin access.
 
-## macOS app
+## Standalone macOS wrapper
+
+The installed combined app is **Interview Pad.app**; see the [parent README](../README.md#installed-mac-app-and-tailnet). These commands build the legacy component wrapper for development.
 
 ```sh
 SKETCHBOOK_URL='https://your-host.your-tailnet.ts.net/static/practice/index.html' bash mac/build.sh
@@ -41,6 +49,14 @@ defaults write com.barney.sketchbook.app SketchbookURL 'https://your-host.your-t
 ```
 
 ## Subscription tutors
+
+The tutor uses Hello Interview's **Delivery Framework** as its default coaching rubric:
+requirements (~5 minutes), core entities (~2), API/system interface (~5), optional data flow
+(~5), high-level design (~10–15), and deep dives (~10). It prioritizes a working design for
+the core functional requirements before refining non-functional requirements, uses estimates
+when they affect a decision, and gives guidance appropriate to your current stage and selected
+focus region. Timings are flexible practice guides. Ask for a different approach or an overall
+review whenever useful. This default applies to new questions in existing conversations too.
 
 Install and sign in to the providers' official CLIs **on the host Mac**:
 
@@ -71,7 +87,7 @@ Saves use optimistic revisions. Two devices can read the same library; a stale e
 
 Deleting a checkpoint removes its changes and rebuilds later incremental checkpoints. A clean-slate checkpoint creates an explicit boundary, so earlier edits cannot reappear through it. Switching checkpoints retains unsaved drafts. Undo restores the most recent deletion until another sketch edit or navigation; daily backups provide additional recovery. Removed attempt conversations remain on disk for recovery. Legacy notes and timing data are preserved in storage/import/export, though their controls are no longer shown.
 
-The historical `/static/practice/` URL and browser storage IDs remain for compatibility. Source is independent of its original interview-practice workspace.
+The historical `/static/practice/` URL and browser storage IDs remain for compatibility. The combined Interview Pad server continues to serve legacy practice URLs in System Design mode.
 
 ## Development
 

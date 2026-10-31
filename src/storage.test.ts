@@ -19,6 +19,7 @@ function project(): Project {
 test("reload preserves checkpoints, unfinished draft and image files", async () => {
   assert.equal(await loadProject(), null);
   const original = project();
+  original.problems = [{ id: "payments", title: "Payments", intuition: "Retries happen.\nMake operations idempotent." }];
   const revision = await saveProject(original, null);
   assert.deepEqual(await loadProject(), { project: original, revision });
   original.draft.notes = "Unsaved change.";

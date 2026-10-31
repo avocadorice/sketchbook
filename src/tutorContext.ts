@@ -9,12 +9,18 @@ export function inFocus(scene: Scene, focus: Focus | Focus[] | null): Scene {
     return x + Math.abs(w) >= focus.x && x <= focus.x + focus.width && y + Math.abs(h) >= focus.y && y <= focus.y + focus.height;
   })) };
 }
-export function tutorContext(project: Project, focus: Focus | Focus[] | null) {
+// Even text-only follow-ups retain checkpoint boundaries for history filtering.
+export function tutorConversationContext(project: Project) {
   const index = project.draft.index ?? project.attempt.chapters.length;
-  const prior = project.attempt.chapters.slice(0, index).map((chapter, i) => ({ id: chapter.id, number: i + 1, title: chapter.title, scene: inFocus(sceneAt(project.attempt, i), focus) }));
-  return { title: project.attempt.prompt, checkpointId: project.draft.index === null ? project.draft.id ?? `next-${project.attempt.chapters.length}` : project.attempt.chapters[index]?.id,
-    checkpointNumber: index + 1, priorCheckpointIds: prior.map(c => c.id), priorCheckpoints: prior,
-    futureExcluded: true, focus, scene: inFocus(project.draft.scene, focus) };
+  const problem = project.problems?.find(p => p.id === project.problemId);
+  return { ...(problem?.description ? { question: { description: problem.description, source: problem.source, asked: problem.asked } } : {}), title: project.attempt.prompt, checkpointId: project.draft.index === null ? project.draft.id ?? `next-${project.attempt.chapters.length}` : project.attempt.chapters[index]?.id,
+    checkpointNumber: index + 1, priorCheckpointIds: project.attempt.chapters.slice(0, index).map(chapter => chapter.id),
+    futureExcluded: true };
+}
+export function tutorContext(project: Project, focus: Focus | Focus[] | null) {
+  const boundary = tutorConversationContext(project);
+  const prior = project.attempt.chapters.slice(0, boundary.checkpointNumber - 1).map((chapter, i) => ({ id: chapter.id, number: i + 1, title: chapter.title, scene: inFocus(sceneAt(project.attempt, i), focus) }));
+  return { ...boundary, priorCheckpoints: prior, focus, scene: inFocus(project.draft.scene, focus) };
 }
 export function matchesSearch(project: Pick<Project, 'attempt' | 'draft' | 'drafts'>, query: string): boolean {
   const text = [project.attempt.prompt, ...project.attempt.chapters.map(c => c.title),

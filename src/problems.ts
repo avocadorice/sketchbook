@@ -1,6 +1,24 @@
 import type { Project, PastAttempt } from './storage';
-export type Problem = { id: string; title: string };
+export type Problem = { id: string; title: string; workspace?: 'sketch'; intuition?: string; companies?: string[]; description?: string; source?: string; asked?: { fromMonth: string; toMonth: string; note: string } };
+export function normalizeTags(tags: readonly string[]): string[] {
+  return [...new Map(tags.map(tag => tag.trim()).filter(Boolean).map(tag => [tag.toLowerCase(), tag])).values()];
+}
+export function companyTags(text: string): string[] {
+  return normalizeTags(text.split(','));
+}
+export function tagProblem(project: Project, tags: string | readonly string[]): Project {
+  // Keep the existing storage field and legacy CSV callers; the picker supplies whole tags.
+  const companies = typeof tags === 'string' ? companyTags(tags) : normalizeTags(tags);
+  return { ...project, problems: project.problems?.map(problem => problem.id === project.problemId ? { ...problem, companies } : problem) };
+}
+export function matchesCompany(problem: Problem, company: string): boolean {
+  return !company || (problem.companies ?? []).some(tag => tag.toLowerCase() === company.toLowerCase());
+}
 export type Entry = Project | PastAttempt;
+/** Problems are appended at creation/import; opening or editing never changes this order. */
+export function newestProblems(project: Project): Problem[] {
+  return [...(project.problems ?? [])].reverse();
+}
 /** Preserve attempt IDs/conversations; group legacy entries by their exact normalized title. */
 export function organizeProblems(project: Project): Project {
   if (project.schemaVersion === 2 && project.problemId && project.problems?.length) return project;

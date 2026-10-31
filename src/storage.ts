@@ -1,5 +1,6 @@
 import type { BinaryFiles } from "@excalidraw/excalidraw/types";
-import { checkpoint, createAttempt, normalizeScene, parseAttempt, type Attempt, type Scene } from "./history";
+import { normalizeScene, parseAttempt, type Attempt, type Scene } from "./history";
+import { createSketchProject } from "./workspace";
 import type { Problem } from "./problems";
 import type { Drafts } from "./drafts";
 
@@ -15,7 +16,7 @@ const key = "current";
 
 export class StorageConflictError extends Error {
   override name = "StorageConflictError";
-  constructor() { super("This practice attempt changed in another tab or on another device. Reload to use its saved version; your current sketch has not overwritten it."); }
+  constructor() { super("Another window saved changes. Retry saving to recover your work alongside the latest saved library."); }
 }
 
 // Served by scripts/practice_server.py, the attempt lives on the host Mac and every device shares it.
@@ -88,7 +89,14 @@ function parseProject(value: unknown): Project {
     });
   }
   if (value.drawingId !== undefined && (typeof value.drawingId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(value.drawingId))) throw new Error("Invalid drawing ID.");
-  if (value.problems !== undefined && (!Array.isArray(value.problems) || value.problems.some(p => !object(p) || typeof p.id !== "string" || typeof p.title !== "string"))) throw new Error("Invalid practice problems.");
+  if (value.problems !== undefined && (!Array.isArray(value.problems) || value.problems.some(p => !object(p) || typeof p.id !== "string" || typeof p.title !== "string" || (p.intuition !== undefined && (typeof p.intuition !== "string" || p.intuition.length > 100000))))) throw new Error("Invalid practice problems.");
+  if (Array.isArray(value.problems) && value.problems.some(p => p.workspace !== undefined && p.workspace !== 'sketch')) throw new Error("Invalid problem workspace.");
+  if (Array.isArray(value.problems) && value.problems.some(p => p.companies !== undefined && (!Array.isArray(p.companies) || !p.companies.every((tag: unknown) => typeof tag === 'string' && tag.length <= 100)))) throw new Error("Invalid problem tags. Each tag must be at most 100 characters.");
+  if (Array.isArray(value.problems) && value.problems.some(p =>
+    (p.description !== undefined && (typeof p.description !== 'string' || p.description.length > 100000)) ||
+    (p.source !== undefined && (typeof p.source !== 'string' || p.source.length > 4000)) ||
+    (p.asked !== undefined && (!object(p.asked) || !['fromMonth', 'toMonth'].every(key => typeof p.asked[key] === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(p.asked[key])) || p.asked.fromMonth > p.asked.toMonth || typeof p.asked.note !== 'string' || p.asked.note.length > 10000))
+  )) throw new Error("Invalid imported question metadata.");
   return {
     ...(value.schemaVersion === 2 ? { schemaVersion: 2 as const } : {}),
     ...(Array.isArray(value.problems) ? { problems: structuredClone(value.problems) as Problem[] } : {}),
@@ -146,7 +154,7 @@ async function transaction<T>(
   });
 }
 
-export async function loadProject(): Promise<SavedProject | null> {
+export async function loadProject(requireHost = false): Promise<SavedProject | null> {
   const response = await askHost({ cache: "no-store" });
   if (response?.headers.get("X-Nexo-Practice-Store") === "host") {
     where = "host";
@@ -154,6 +162,7 @@ export async function loadProject(): Promise<SavedProject | null> {
     if (!response.ok) throw new Error(`The host Mac could not read the practice attempt (${response.status}).`);
     return parseSaved(await response.json());
   }
+  if (requireHost) throw new Error("The host Mac is not reachable. Your current work is still open; retry when it reconnects.");
   where = "browser";
   return transaction("readonly", (_store, saved) => saved);
 }
@@ -163,7 +172,8 @@ export function parseImport(text: string, title = "Imported sketch"): Project {
   const value: unknown = JSON.parse(text);
   if (object(value) && value.type === "excalidraw" && Array.isArray(value.elements)) {
     const scene = normalizeScene({ elements: value.elements.filter(element => !element.isDeleted), backgroundColor: object(value.appState) && typeof value.appState.viewBackgroundColor === "string" ? value.appState.viewBackgroundColor : "#ffffff" });
-    return parseProject({ attempt: checkpoint(createAttempt(title), scene, "Imported sketch", ""), draft: { index: null, scene, title: "", notes: "" }, files: value.files ?? {} });
+    const project = createSketchProject(title);
+    return parseProject({ ...project, draft: { ...project.draft, scene }, files: value.files ?? {} });
   }
   return parseProject(object(value) && "project" in value ? value.project : value);
 }

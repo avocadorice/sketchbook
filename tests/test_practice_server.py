@@ -60,6 +60,28 @@ def test_empty_then_saved_attempt_is_shared_and_marked_as_host_storage(running):
     assert json.loads((root / ".local/practice/project.json").read_text()) == saved
 
 
+def test_desktop_link_uses_existing_tutor_route_and_returns_attachment_receipt(running):
+    from test_codex_handoff import LINK, item, load_session, rollout, wait
+    root, port = running
+    home = root / 'synthetic-codex'
+    rollout(home, [item('message', role='user', content='Desktop context')])
+    tutor = practice.PracticeHandler.tutor
+    tutor.session_loader = lambda link: load_session(link, home)
+    prompts = []
+    def runner(provider, effort, prompt, *args):
+        prompts.append(prompt)
+        return 'Continue here.'
+    tutor.runner = runner
+    response, result = call(port, 'POST', '/static/practice/api/tutor/ask', {
+        'id': 'handoff-drawing', 'revision': 0, 'question': LINK, 'context': {'checkpointId': 'only'}
+    }, HEADERS)
+    assert response.status == 200
+    assert result['turns'][0]['handoff']['link'] == LINK
+    wait(tutor, 'handoff-drawing')
+    assert 'Desktop context' in prompts[-1]
+    assert 'context' not in tutor.public('handoff-drawing')['turns'][0]
+
+
 def test_stale_revision_is_rejected_and_keeps_the_winner(running):
     _, port = running
     _, first = save(port, None)

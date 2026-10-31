@@ -2,16 +2,27 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Excalidraw, MainMenu, restoreElements } from "@excalidraw/excalidraw";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
-import { checkpoint, createAttempt, deleteChapter, sceneAt, updateChapter, normalizeScene, type Scene, moveChapter, skippedChanges } from "./history";
-import { loadProject, parseImport, saveProject, storageLocation, type Project, type Timing } from "./storage";
-import { tutorContext, matchesSearch, type Focus } from "./tutorContext";
-import { organizeProblems, nextAttemptNumber, renameProblem } from "./problems";
+import { normalizeScene, type Scene } from "./history";
+import { loadProject, parseImport, saveProject, storageLocation, StorageConflictError, type Project } from "./storage";
+import { recoverProject } from "./recovery";
+import { tutorContext, tutorConversationContext, matchesSearch, type Focus } from "./tutorContext";
+import { organizeProblems, renameProblem, tagProblem, matchesCompany, newestProblems } from "./problems";
 import { captureViewport, visibleRegions, screenToScene, sceneToScreen, type View } from "./viewport";
-import { draftKey, draftsAfterDelete, rekeyDrafts } from "./drafts";
+import { createSketchProject, deleteProblem, isSketchProject, legacyView, openProblem, shelveProject, type LegacySelection } from "./workspace";
+import { LegacyHistory } from "./LegacyHistory";
+import { ProblemList } from "./ProblemList";
 
+import { TutorMarkdown } from "../../shared/TutorMarkdown";
 import { TutorPanel } from "./TutorPanel";
+import { TutorPaneResizer, useTutorPaneLayout } from "./TutorPaneResizer";
+import { tutorDividerWidth } from "./tutorPaneLayout";
+import { ProblemPaneResizer, useProblemPaneLayout } from "./ProblemPaneResizer";
+import { problemDividerWidth } from "./problemPaneLayout";
+import { NavigatorTabs, type NavigatorSection } from "./NavigatorTabs";
+import { TagEditor } from "./TagEditor";
+import { FocusToolbar, useFocusMode } from "./DesignFocus";
+import { hideFocusPane, visibleFocusPanes } from "./focusMode";
 
-const prompt = "Untitled problem";
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 function sceneFrom(elements: readonly ExcalidrawElement[], state: AppState): Scene {
   return normalizeScene({
@@ -21,13 +32,6 @@ function sceneFrom(elements: readonly ExcalidrawElement[], state: AppState): Sce
     }),
     backgroundColor: state.viewBackgroundColor,
   });
-}
-function freshProject(problemId: string = crypto.randomUUID(), title = prompt): Project {
-  const attempt = createAttempt(title);
-  return { schemaVersion: 2, problemId, problems: [{ id: problemId, title }], drawingId: crypto.randomUUID(), attemptNumber: 1, attempt, draft: { id: crypto.randomUUID(), index: null, scene: sceneAt(attempt, -1), title: "", notes: "" }, files: {} };
-}
-function timingOf(project: Project): Timing {
-  return project.timing ?? { enabled: false, chaptersMs: project.attempt.chapters.map(() => 0), draftMs: 0 };
 }
 function canvasElements(scene: Scene): ExcalidrawElement[] {
   const ids = new Set(scene.elements.map(element => element.id));
@@ -49,7 +53,7 @@ export function App(): React.JSX.Element {
   const [loaded, setLoaded] = useState<{ project: Project; revision: string | null }>();
   const [error, setError] = useState("");
   useEffect(() => { void loadProject().then(async value => {
-    if (!value) { setLoaded({ project: freshProject(), revision: null }); return; }
+    if (!value) { setLoaded({ project: createSketchProject(), revision: null }); return; }
     const project = organizeProblems(value.project);
     const revision = same(project, value.project) ? value.revision : await saveProject(project, value.revision);
     setLoaded({ project, revision });
@@ -63,8 +67,24 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
   const api = useRef<ExcalidrawImperativeAPI | null>(null);
   const [showLibrary, setShowLibrary] = useState(localStorage.getItem("practice-problems-pane") !== "hidden");
   const [showTutor, setShowTutor] = useState(localStorage.getItem("practice-tutor-pane") !== "hidden");
+  const focusMode = useFocusMode();
+  const visible = visibleFocusPanes(focusMode.enabled, focusMode.preset, { library: showLibrary, tutor: showTutor });
+  const hidePane = (pane: 'library' | 'tutor') => {
+    if (focusMode.enabled) focusMode.setPreset(hideFocusPane(focusMode.preset, pane));
+    else if (pane === 'library') setShowLibrary(false);
+    else setShowTutor(false);
+  };
+  const tutorLayout = useTutorPaneLayout(visible.library, problemDividerWidth);
+  const problemLayout = useProblemPaneLayout(tutorLayout.workspaceRef);
+  const [navigatorSection, setNavigatorSection] = useState<NavigatorSection>('problems');
+  const showCurrentProblem = () => {
+    setNavigatorSection('attempt');
+    requestAnimationFrame(() => document.getElementById('navigator-tab-attempt')?.focus());
+  };
   const [search, setSearch] = useState("");
-  const [undo, setUndo] = useState<{ project: Project; label: string } | null>(null);
+  const [tagFilter, setTagFilter] = useState("");
+  const [legacySelection, setLegacySelection] = useState<LegacySelection>(null);
+  const viewing = useRef(initial);
   const [focuses, setFocuses] = useState<Focus[]>([]);
   const [view, setView] = useState<View>({ scrollX: 0, scrollY: 0, zoom: 1, width: 1, height: 1 });
   const [focusing, setFocusing] = useState(false);
@@ -74,6 +94,7 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
   const [project, setProject] = useState(initial);
   const current = useRef(initial);
   const revision = useRef(initialRevision);
+  const savedProject = useRef(initial);
   const pending = useRef<Project | null>(null);
   const writer = useRef<Promise<void> | null>(null);
   const failure = useRef<Error | null>(null);
@@ -100,6 +121,7 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
         while (pending.current) {
           const snapshot = pending.current; pending.current = null;
           revision.current = await saveProject(snapshot, revision.current);
+          savedProject.current = snapshot;
         }
         failure.current = null; setSaveError(""); setSaveStatus(savedLabel);
       } catch (error) {
@@ -112,7 +134,8 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     writer.current = write(); return writer.current;
   }, []);
   const change = useCallback((next: Project): void => {
-    current.current = next; setProject(next); setMessage(""); setUndo(null);
+    if (!isSketchProject(current.current)) return;
+    current.current = next; setProject(next); setMessage("");
     void persist(next).catch(() => { /* The visible save error keeps the draft available. */ });
   }, [persist]);
   useEffect(() => { localStorage.setItem("practice-problems-pane", showLibrary ? "visible" : "hidden"); }, [showLibrary]);
@@ -131,183 +154,60 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     if (loadingCanvas.current) return;
     const nextView = { scrollX: appState.scrollX, scrollY: appState.scrollY, zoom: appState.zoom.value, width: appState.width, height: appState.height };
     setView(old => same(old, nextView) ? old : nextView);
-    const old = current.current; const scene = sceneFrom(elements, appState);
+    const old = current.current;
+    if (!isSketchProject(old)) return;
+    const scene = sceneFrom(elements, appState);
     const allFiles = { ...old.files, ...files };
     if (same(scene, old.draft.scene) && same(allFiles, old.files)) return;
     change({ ...old, files: allFiles, draft: { ...old.draft, scene } });
   }, [change]);
   const loadCanvas = (next: Project): void => {
-    setFocuses([]); setFocusScreen(null); setFocusing(false); setUndo(null);
+    setFocuses([]); setFocusScreen(null); setFocusing(false); setLegacySelection(null);
     loadingCanvas.current = true; current.current = next; setProject(next); setCanvasKey(value => value + 1);
   };
   const onReady = useCallback((instance: ExcalidrawImperativeAPI): void => {
     api.current = instance;
     requestAnimationFrame(() => { loadingCanvas.current = false; if (instance.getSceneElements().length) instance.scrollToContent(undefined, { fitToViewport: true, maxZoom: 1 }); });
   }, []);
-  const isDirty = (): boolean => {
-    const { attempt, draft } = current.current;
-    const saved = draft.index === null ? undefined : attempt.chapters[draft.index];
-    const base = sceneAt(attempt, draft.index ?? attempt.chapters.length - 1);
-    return Boolean(draft.cleanSlate) || !same(draft.scene, base) || draft.title !== (saved?.title ?? "") || draft.notes !== (saved?.notes ?? "");
+  const selectLegacyCheckpoint = (selection: LegacySelection): void => {
+    if (busy || isSketchProject(current.current)) return;
+    loadingCanvas.current = true;
+    setFocuses([]); setFocusScreen(null); setFocusing(false);
+    setLegacySelection(selection); setCanvasKey(value => value + 1);
   };
-  const label = (index: number | null): string => index === null ? "the next checkpoint" : `checkpoint ${index + 1}`;
-  const savedDraftOf = (project: Project, index: number | null): Project["draft"] => {
-    const chapter = index === null ? undefined : project.attempt.chapters[index];
-    return { id: index === null ? crypto.randomUUID() : project.attempt.chapters[index]?.id, index, scene: sceneAt(project.attempt, index ?? project.attempt.chapters.length - 1), title: chapter?.title ?? "", notes: chapter?.notes ?? "" };
-  };
-  // Switching keeps unsaved edits as a draft of the checkpoint you leave, and reopens any draft you return to.
-  const switchChapter = async (index: number | null): Promise<void> => {
-    if (busy || index === current.current.draft.index) return;
-    const old = current.current; const dirty = isDirty();
-    const drafts = { ...(old.drafts ?? {}) };
-    const leaving = draftKey(old.draft.index);
-    if (dirty) drafts[leaving] = { id: old.draft.id, cleanSlate: old.draft.cleanSlate, scene: old.draft.scene, title: old.draft.title, notes: old.draft.notes };
-    else delete drafts[leaving];
-    const kept = drafts[draftKey(index)]; delete drafts[draftKey(index)];
-    const next = { ...old, drafts, draft: kept ? { index, ...kept } : savedDraftOf(old, index) };
-    setBusy(true); loadingCanvas.current = true;
-    try {
-      await persist(next); loadCanvas(next);
-      setMessage([dirty ? `Your edits to ${label(old.draft.index)} are kept as a draft.` : "", kept ? `Reopened your draft of ${label(index)}.` : ""].filter(Boolean).join(" "));
-    } catch { loadingCanvas.current = false; }
-    finally { setBusy(false); }
-  };
-  const discardDraft = async (): Promise<void> => {
-    const index = current.current.draft.index;
-    if (busy || !window.confirm(`Discard your unsaved edits to ${label(index)}?`)) return;
-    const old = current.current; const timing = timingOf(old);
-    const next = { ...old, timing: index === null ? { ...timing, draftMs: 0 } : timing, draft: savedDraftOf(old, index) };
-    setBusy(true); loadingCanvas.current = true;
-    try { await persist(next); loadCanvas(next); setMessage("Draft discarded; showing the saved version."); }
-    catch { loadingCanvas.current = false; }
-    finally { setBusy(false); }
-  };
-  const saveCheckpoint = async (): Promise<void> => {
+  const newProblem = async (): Promise<void> => {
     if (busy) return;
-    const old = current.current; const { draft } = old;
-    const title = draft.title.trim() || `Checkpoint ${(draft.index ?? old.attempt.chapters.length) + 1}`;
-    const attempt = draft.index === null ? checkpoint(old.attempt, draft.scene, title, draft.notes) : updateChapter(old.attempt, draft.index, draft.scene, title, draft.notes);
-    if (draft.index === null) {
-      if (draft.cleanSlate) attempt.chapters[attempt.chapters.length - 1] = { ...checkpoint(createAttempt(""), draft.scene, title, draft.notes).chapters[0], reset: true };
-      attempt.chapters[attempt.chapters.length - 1].id = draft.id ?? crypto.randomUUID();
-    }
-    const timing = timingOf(old);
-    const next = { ...old, attempt, timing: draft.index === null
-      ? { ...timing, chaptersMs: [...timing.chaptersMs, timing.draftMs], draftMs: 0 } : timing,
-      draft: draft.index === null
-      ? { id: crypto.randomUUID(), index: null, scene: sceneAt(attempt, attempt.chapters.length - 1), title: "", notes: "" }
-      : { ...draft, title, scene: sceneAt(attempt, draft.index) } };
+    const old = current.current; const fresh = createSketchProject();
+    const next: Project = { ...fresh, problems: [...(old.problems ?? []), ...fresh.problems!], files: old.files, past: shelveProject(old) };
     setBusy(true); loadingCanvas.current = true;
-    try {
-      await persist(next); loadCanvas(next);
-      setMessage(draft.index === null ? `Checkpoint ${attempt.chapters.length} saved. Keep drawing for the next one.` : `Checkpoint ${draft.index + 1} overwritten. Later checkpoints now include its changes.`);
-    } catch { loadingCanvas.current = false; }
-    finally { setBusy(false); }
-  };
-  const removeChapter = async (index: number): Promise<void> => {
-    if (busy) return;
-    const old = current.current;
-    const attempt = deleteChapter(old.attempt, index);
-    const timing = timingOf(old);
-    const keptDrafts = { ...old.drafts };
-    if (isDirty() && old.draft.index !== index) keptDrafts[draftKey(old.draft.index)] = { ...old.draft };
-    const drafts = draftsAfterDelete(keptDrafts, index);
-    const next: Project = { ...old, attempt, drafts, timing: { ...timing, chaptersMs: timing.chaptersMs.filter((_, i) => i !== index) },
-      draft: { id: crypto.randomUUID(), index: null, scene: sceneAt(attempt), title: "", notes: "" } };
-    setBusy(true);
-    try { await persist(next); loadCanvas(next); setUndo({ project: old, label: `Checkpoint ${index + 1} deleted` }); }
-    finally { setBusy(false); }
-  };
-  const undoDelete = async (): Promise<void> => {
-    if (!undo || busy) return;
-    setBusy(true);
-    try { await persist(undo.project); loadCanvas(undo.project); setUndo(null); setMessage("Deletion undone."); }
-    finally { setBusy(false); }
-  };
-  const deleteAttempt = async (position: number | null): Promise<void> => {
-    if (busy) return;
-    const old = current.current;
-    let next: Project;
-    if (position === null) {
-      const [first, ...rest] = old.past ?? [];
-      next = first ? { ...first, schemaVersion: 2, problems: old.problems, files: old.files, past: rest } : { ...freshProject(old.problemId, old.attempt.prompt), problems: old.problems, files: old.files };
-    } else next = { ...old, past: old.past?.filter((_, i) => i !== position) };
-    setBusy(true);
-    try { await persist(next); loadCanvas(next); setUndo({ project: old, label: "Attempt deleted" }); }
-    finally { setBusy(false); }
-  };
-  const createCheckpoint = async (cleanSlate: boolean): Promise<void> => {
-    if (busy) return;
-    const old = current.current;
-    // Save the current draft first, then select a new independent or incremental draft.
-    if (isDirty()) await saveCheckpoint();
-    if (failure.current) return;
-    if (current.current.draft.index !== null && current.current.drafts?.next) {
-      await switchChapter(null);
-      if (failure.current) return;
-      await saveCheckpoint();
-      if (failure.current) return;
-    }
-    const latest = current.current;
-    const next: Project = { ...latest, draft: { id: crypto.randomUUID(), index: null, title: "", notes: "", cleanSlate,
-      scene: cleanSlate ? { elements: [], backgroundColor: latest.draft.scene.backgroundColor } : sceneAt(latest.attempt) } };
-    await persist(next); loadCanvas(next);
-  };
-  const renameCheckpoint = (index: number, title: string): void => {
-    const old = current.current;
-    change({ ...old, attempt: { ...old.attempt, chapters: old.attempt.chapters.map((c, i) => i === index ? { ...c, title } : c) },
-      draft: old.draft.index === index ? { ...old.draft, title } : old.draft,
-      drafts: Object.fromEntries(Object.entries(old.drafts ?? {}).map(([key, draft]) => [key, key === String(index) ? { ...draft, title } : draft])) });
-  };
-  const moveChapterTo = async (from: number, to: number): Promise<void> => {
-    const old = current.current;
-    if (busy || to < 0 || to >= old.attempt.chapters.length) return;
-    if (isDirty()) { setMessage("Save or discard your current edits first. Switching to another checkpoint also keeps them as a draft."); return; }
-    const attempt = moveChapter(old.attempt, from, to);
-    const skipped = (value: typeof attempt): number => value.chapters.reduce((sum, _, i) => sum + skippedChanges(value, i), 0);
-    const newlySkipped = skipped(attempt) - skipped(old.attempt);
-    if (newlySkipped > 0 && !window.confirm(`${newlySkipped} edit${newlySkipped === 1 ? "" : "s"} would act on items that don’t exist yet at the new position, so ${newlySkipped === 1 ? "it is" : "they are"} skipped. Moving back restores ${newlySkipped === 1 ? "it" : "them"}. Move anyway?`)) return;
-    // Indices between the two positions shift by one; the moved chapter lands at "to".
-    const remap = (i: number): number => i === from ? to : from < i && i <= to ? i - 1 : to <= i && i < from ? i + 1 : i;
-    const timing = timingOf(old);
-    const chaptersMs = [...timing.chaptersMs]; chaptersMs.splice(to, 0, ...chaptersMs.splice(from, 1));
-    const index = old.draft.index === null ? null : remap(old.draft.index);
-    const next = { ...old, attempt, drafts: rekeyDrafts(old.drafts ?? {}, remap), timing: { ...timing, chaptersMs }, draft: { ...old.draft, index, scene: sceneAt(attempt, index ?? attempt.chapters.length - 1) } };
-    setBusy(true); loadingCanvas.current = true;
-    try { await persist(next); loadCanvas(next); setMessage(`Moved “${attempt.chapters[to]!.title}” to position ${to + 1}. Later checkpoints replay in the new order.`); }
-    catch { loadingCanvas.current = false; }
-    finally { setBusy(false); }
-  };
-  // A fresh attempt never deletes work: the current one moves to Practice Problems and can be reopened.
-  const shelved = (project: Project): Project["past"] => {
-    const { problemId, drawingId, attemptNumber, attempt, draft, timing, drafts } = project;
-    const empty = !attempt.chapters.length && !draft.scene.elements.length && !draft.title && !draft.notes && (attempt.prompt === prompt || !attempt.prompt);
-    return empty && !drawingId ? project.past ?? [] : [{ problemId, drawingId, attemptNumber, savedAt: Date.now(), attempt, draft, ...(timing ? { timing } : {}), ...(drafts ? { drafts } : {}) }, ...(project.past ?? [])];
-  };
-  const resetAttempt = async (newProblem = false): Promise<void> => {
-    if (busy) return;
-    const old = current.current;
-    const fresh = newProblem ? freshProject() : freshProject(old.problemId, old.attempt.prompt);
-    const next: Project = { ...fresh, problems: newProblem ? [...(old.problems ?? []), ...fresh.problems!] : old.problems,
-      attemptNumber: newProblem ? 1 : nextAttemptNumber(old, old.problemId!), files: old.files, past: shelved(old), timing: { enabled: timingOf(old).enabled, chaptersMs: [], draftMs: 0 } };
-    setBusy(true); loadingCanvas.current = true;
-    try { await persist(next); loadCanvas(next); setMessage("New attempt ready. Your previous attempt is in Attempts."); }
+    try { await persist(next); loadCanvas(next); showCurrentProblem(); setMessage("New problem ready. Your sketch saves automatically."); }
     catch { loadingCanvas.current = false; }
     finally { setBusy(false); }
   };
   const openPast = async (position: number): Promise<void> => {
-    const old = current.current; const chosen = old.past?.[position];
-    if (busy || !chosen) return;
-    const rest = (old.past ?? []).filter((_, i) => i !== position);
-    const { savedAt: _savedAt, ...restored } = chosen;
-    const past = shelved({ ...old, past: rest }) ?? [];
-    const next: Project = { schemaVersion: 2, problems: old.problems, files: old.files, ...restored, past };
+    const old = current.current;
+    if (busy || !old.past?.[position]) return;
+    const next = openProblem(old, position);
     setBusy(true); loadingCanvas.current = true;
-    try { await persist(next); loadCanvas(next); setMessage(`Reopened the attempt from ${new Date(chosen.savedAt).toLocaleString()}.${past.length > rest.length ? " The one you were on is under Practice Problems." : ""}`); }
+    try { await persist(next); loadCanvas(next); showCurrentProblem(); setMessage(isSketchProject(next) ? "" : "Archived problem · Read only."); }
     catch { loadingCanvas.current = false; }
     finally { setBusy(false); }
   };
-  const chapters = (count: number): string => `${count} checkpoint${count === 1 ? "" : "s"}`;
+  const removeProblem = async (problemId: string): Promise<void> => {
+    if (busy) return;
+    const old = current.current;
+    const problem = old.problems?.find(problem => problem.id === problemId);
+    if (!problem || !window.confirm(`Delete “${problem.title || 'Untitled problem'}” and all its sketches and checkpoints? This cannot be undone.`)) return;
+    const next = deleteProblem(old, problemId);
+    setBusy(true); loadingCanvas.current = true;
+    try {
+      await persist(next);
+      if (old.problemId === problemId) loadCanvas(next);
+      else { current.current = next; setProject(next); loadingCanvas.current = false; }
+      setMessage(`Deleted “${problem.title || 'Untitled problem'}”.`);
+    } catch { loadingCanvas.current = false; }
+    finally { setBusy(false); }
+  };
   const importAttempt = async (file: File): Promise<void> => {
     if (busy) return;
     let imported: Project;
@@ -324,9 +224,9 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
       for (const [key, draft] of Object.entries(entry.drafts ?? {})) draft.id = key === 'next' ? crypto.randomUUID() : entry.attempt.chapters[Number(key)]?.id;
     }
     const old = current.current;
-    const next: Project = { ...imported, problems: [...(old.problems ?? []), ...imported.problems], files: { ...old.files, ...imported.files }, past: [...(shelved(old) ?? []), ...(imported.past ?? [])] };
+    const next: Project = { ...imported, problems: [...(old.problems ?? []), ...imported.problems], files: { ...old.files, ...imported.files }, past: [...(shelveProject(old) ?? []), ...(imported.past ?? [])] };
     setBusy(true); loadingCanvas.current = true;
-    try { await persist(next); loadCanvas(next); setMessage(`Imported ${chapters(next.attempt.chapters.length)} from ${file.name}. Your previous attempt is under Practice Problems.`); }
+    try { await persist(next); loadCanvas(next); showCurrentProblem(); setMessage(`Imported ${file.name}. Your previous problems are kept in Problems.`); }
     catch { loadingCanvas.current = false; }
     finally { setBusy(false); }
   };
@@ -335,26 +235,55 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     const link = document.createElement("a"); link.href = url; link.download = "practice-problems.json"; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  const capture = async () => {
-    if (!api.current || !drawingBox.current) throw new Error("The canvas is not ready.");
-    // Freeze the visible pixels and scene together, before waiting for network persistence.
-    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    const snapshot = current.current;
-    const state = api.current.getAppState();
-    const viewport = { scrollX: state.scrollX, scrollY: state.scrollY, zoom: state.zoom.value, width: state.width, height: state.height };
-    const image = captureViewport(drawingBox.current, focuses, viewport);
-    const context = { ...tutorContext(snapshot, visibleRegions(focuses, viewport)), problemId: snapshot.problemId, attemptNumber: snapshot.attemptNumber,
-      captureMode: focuses.length ? "focus-regions" : "visible-viewport", viewport };
-    await persist(snapshot);
-    return { id: snapshot.drawingId!, image, context };
+  const retrySave = async (): Promise<void> => {
+    if (busy) return;
+    if (writer.current) await writer.current.catch(() => {});
+    if (!(failure.current instanceof StorageConflictError)) { await persist(current.current).catch(() => {}); return; }
+    setBusy(true); loadingCanvas.current = true;
+    try {
+      const latest = await loadProject(storageLocation() === 'host');
+      if (!latest) throw new Error('The saved library is unavailable. Export your open work and retry.');
+      const recovered = recoverProject(current.current, latest.project, savedProject.current);
+      const nextRevision = await saveProject(recovered, latest.revision);
+      revision.current = nextRevision; savedProject.current = recovered;
+      failure.current = null; pending.current = null; setSaveError(''); setSaveStatus(savedLabel);
+      loadCanvas(recovered); setMessage('Work recovered and saved. Concurrent edits are kept as separate sketches.');
+      window.parent.dispatchEvent(new Event('practicepad-saved'));
+    } catch (error) {
+      // The conflict remains unresolved even if recovery failed because the host was offline.
+      failure.current = new StorageConflictError();
+      setSaveError(error instanceof Error ? error.message : String(error)); setSaveStatus('Not saved'); loadingCanvas.current = false;
+    } finally { setBusy(false); }
+  };
+  const capture = async (includeCanvas: boolean) => {
+    if (includeCanvas) {
+      if (!api.current || !drawingBox.current) throw new Error("The canvas is not ready.");
+      // Freeze the visible pixels and scene together, before waiting for network persistence.
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    }
+    const snapshot = viewing.current;
+    let image: string | null = null;
+    let context;
+    if (includeCanvas) {
+      const state = api.current!.getAppState();
+      const viewport = { scrollX: state.scrollX, scrollY: state.scrollY, zoom: state.zoom.value, width: state.width, height: state.height };
+      image = captureViewport(drawingBox.current!, focuses, viewport);
+      context = { ...tutorContext(snapshot, visibleRegions(focuses, viewport)), captureMode: focuses.length ? "focus-regions" : "visible-viewport", viewport };
+    } else {
+      context = { ...tutorConversationContext(snapshot), captureMode: "conversation-only" };
+    }
+    if (isSketchProject(snapshot)) await persist(snapshot);
+    else { if (writer.current) await writer.current; if (failure.current) throw failure.current; }
+    return { id: snapshot.drawingId!, image, context: { ...context, problemId: snapshot.problemId, attemptNumber: snapshot.attemptNumber } };
   };
   useEffect(() => {
     window.sketchbookFlushDraft = async () => { if (writer.current) await writer.current; if (failure.current) throw failure.current; };
     return () => { delete window.sketchbookFlushDraft; };
   }, [persist]);
-  const { draft, attempt } = project;
-  const dirtyNow = isDirty();
-  const hasDraft = (index: number | null): boolean => Boolean(project.drafts?.[draftKey(index)]) || (draft.index === index && dirtyNow);
+  const displayed = legacyView(project, legacySelection);
+  viewing.current = displayed;
+  const { draft, attempt } = displayed;
+  const readOnly = !isSketchProject(project);
   const finishFocus = (event: React.PointerEvent<HTMLDivElement>): void => {
     const start = focusStart.current; if (!start || !api.current) return;
     const bounds = event.currentTarget.getBoundingClientRect(); const end = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
@@ -364,49 +293,55 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     focusStart.current = null; setFocusScreen(null); setFocusing(event.altKey && event.shiftKey);
   };
   const entries = [{ entry: project, position: null as number | null }, ...(project.past ?? []).map((entry, position) => ({ entry, position }))];
-  const groups = (project.problems ?? []).map(problem => ({ problem, entries: entries.filter(({ entry }) => entry.problemId === problem.id && matchesSearch(entry, search)).sort((a, b) => (a.entry.attemptNumber ?? 1) - (b.entry.attemptNumber ?? 1)) })).filter(g => g.entries.length);
-  return <div className="practice-app">
-    <header className="practice-header">
-      <div className="app-identity"><h1>System Design Practice</h1><input aria-label="Practice problem title" maxLength={2000} disabled={busy} value={attempt.prompt} placeholder="Untitled problem" onChange={e => change(renameProblem(current.current, e.target.value))} /></div>
-      <div className="header-search"><span aria-hidden="true">⌕</span><input aria-label="Search practice problems" type="search" placeholder="Search problems or sketch text" value={search} onChange={e => { setSearch(e.target.value); if (e.target.value) setShowLibrary(true); }} /></div>
-      <nav><button aria-pressed={showLibrary} onClick={() => setShowLibrary(!showLibrary)}>Problems</button><button aria-pressed={showTutor} onClick={() => setShowTutor(!showTutor)}>Tutor</button></nav>
+  const activeProblem = project.problems?.find(p => p.id === project.problemId);
+  const tags = [...new Map((project.problems ?? []).flatMap(p => p.companies ?? []).map(tag => [tag.toLowerCase(), tag])).values()].sort((a, b) => a.localeCompare(b));
+  const groups = newestProblems(project).filter(problem => matchesCompany(problem, tagFilter)).map(problem => ({ problem, entries: entries.filter(({ entry }) => entry.problemId === problem.id && (matchesSearch(entry, search) || (!!search.trim() && search.toLowerCase().trim().split(/\s+/).every(word => `${problem.title} ${problem.description || ''} ${problem.intuition || ''} ${(problem.companies ?? []).join(' ')}`.toLowerCase().includes(word))))).sort((a, b) => (a.entry.attemptNumber ?? 1) - (b.entry.attemptNumber ?? 1)) })).filter(g => g.entries.length);
+  return <div className={`practice-app${focusMode.enabled ? ' design-focus-mode' : ''}`} data-focus-layout={focusMode.enabled ? focusMode.preset : undefined}>
+    <header className="practice-header" hidden={focusMode.enabled}>
+      <div className="app-identity"><h1>System Design Practice</h1><input aria-label="Practice problem title" maxLength={2000} disabled={busy} readOnly={readOnly} value={attempt.prompt} placeholder="Untitled problem" onChange={e => change(renameProblem(current.current, e.target.value))} /></div>
+      <nav><button aria-pressed={showLibrary} onClick={() => setShowLibrary(!showLibrary)}>Problems</button><button aria-pressed={showTutor} onClick={() => setShowTutor(!showTutor)}>Tutor</button><button ref={focusMode.enterButton} onClick={() => focusMode.setEnabled(true)} aria-label="Enter Focus mode">Focus</button></nav>
     </header>
-    <main className="workspace" style={{ gridTemplateColumns: `${showLibrary ? "clamp(200px,20vw,270px) " : ""}minmax(0,1fr)${showTutor ? " clamp(300px,27vw,370px)" : ""}` }}>
-      {showLibrary && <aside className="chapter-panel navigator" aria-label="Practice problems and attempts">
-        <div className="pane-heading"><h2>Practice Problems</h2><button aria-label="Hide problems pane" onClick={() => setShowLibrary(false)}>×</button></div>
-        <button className="new-attempt" disabled={busy} onClick={() => void resetAttempt(true)}>＋ New Problem</button>
-        <div className="problem-list">{groups.map(({ problem, entries }) => <details key={problem.id} open={problem.id === project.problemId || !!search}>
-          <summary>{problem.title || "Untitled problem"}</summary>
-          <ol className="attempt-list">{entries.map(({ entry, position }) => <li key={entry.drawingId} className={position === null ? "current-attempt" : ""}>
-            <button className="attempt-open" aria-current={position === null ? "page" : undefined} disabled={busy || position === null} onClick={() => void openPast(position!)}>Attempt #{entry.attemptNumber ?? 1}</button>
-            <button aria-label={`Delete attempt ${entry.attemptNumber ?? 1} of ${problem.title}`} disabled={busy} onClick={() => void deleteAttempt(position)}>×</button>
-          </li>)}</ol>
-        </details>)}{!groups.length && <p className="hint">No matching problems.</p>}</div>
-        <div className="checkpoint-heading"><h3>Attempt #{project.attemptNumber ?? 1}</h3><button disabled={busy} onClick={() => void resetAttempt()}>＋ New Attempt</button></div>
-        <ol className="chapters">{attempt.chapters.map((chapter, index) => <li key={chapter.id ?? index} className={draft.index === index ? "selected-checkpoint" : ""}>
-          <button className="checkpoint-number" disabled={busy} aria-label={`Open checkpoint ${index + 1}`} aria-current={draft.index === index ? "step" : undefined} onClick={() => void switchChapter(index)}>{index + 1}</button>
-          <input aria-label={`Checkpoint ${index + 1} title`} maxLength={200} value={chapter.title} onChange={e => renameCheckpoint(index, e.target.value)} />
-          <button className="row-delete" aria-label={`Delete checkpoint ${index + 1}`} disabled={busy} onClick={() => void removeChapter(index)}>×</button>
-          <span className="move"><button disabled={busy || index === 0} aria-label={`Move checkpoint ${index + 1} earlier`} onClick={() => void moveChapterTo(index, index - 1)}>↑</button><button disabled={busy || index === attempt.chapters.length - 1} aria-label={`Move checkpoint ${index + 1} later`} onClick={() => void moveChapterTo(index, index + 1)}>↓</button></span>
-          {hasDraft(index) && <em className="draft-mark">draft</em>}
-        </li>)}</ol>
-        {draft.index === null && <div className="draft-row"><span>Checkpoint {attempt.chapters.length + 1} · {draft.cleanSlate ? "clean slate" : "draft"}</span><input aria-label="New checkpoint title" placeholder={`Checkpoint ${attempt.chapters.length + 1}`} maxLength={200} value={draft.title} onChange={e => change({ ...current.current, draft: { ...current.current.draft, title: e.target.value } })} /></div>}
-        <button className="checkpoint" disabled={busy} onClick={() => void saveCheckpoint()}>{draft.index === null ? "Save checkpoint" : "Save changes"}</button>
-        <details className="create-checkpoint"><summary>Create Checkpoint</summary><button disabled={busy} onClick={() => void createCheckpoint(false)}>Continue from latest</button><button disabled={busy} onClick={() => void createCheckpoint(true)}>Start with clean slate</button></details>
-        {dirtyNow && <button className="discard-draft" disabled={busy} onClick={() => void discardDraft()}>Discard draft</button>}
-        {undo && <div className="undo-delete" role="status">{undo.label}. <button onClick={() => void undoDelete()} disabled={busy}>Undo</button></div>}
-        <label className="import-attempt">Import sketch or problems<input type="file" accept="application/json,.json,.excalidraw" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importAttempt(file); }} /></label><button disabled={busy} onClick={exportLibrary}>Export all problems</button>
-      </aside>}
+    {focusMode.enabled && <FocusToolbar preset={focusMode.preset} onPresetChange={focusMode.setPreset} onExit={() => focusMode.setEnabled(false)} exitButton={focusMode.exitButton}
+      context={`${attempt.prompt}${readOnly ? ` · Read only · Checkpoint ${(draft.index ?? attempt.chapters.length) + 1}` : ""}`} />}
+    <main ref={tutorLayout.workspaceRef} className="workspace" style={{ gridTemplateColumns: `${visible.library ? `${problemLayout.width}px ${problemDividerWidth}px ` : ""}minmax(0,1fr)${visible.tutor ? ` ${tutorDividerWidth}px ${tutorLayout.width}px` : ""}` }}>
+      <aside id="design-problems-pane" ref={tutorLayout.libraryRef} className="chapter-panel navigator" aria-label="Practice problems" hidden={!visible.library}>
+        <div className="pane-heading"><h2>Practice Problems</h2><button aria-label="Hide problems pane" onClick={() => hidePane('library')}>×</button></div>
+        <div className="new-problem-row"><button disabled={busy} onClick={() => void newProblem()}>＋ New Problem</button></div>
+        <NavigatorTabs section={navigatorSection} onChange={setNavigatorSection} />
+        <div id="navigator-panel-problems" className="navigator-browser" role="tabpanel" aria-labelledby="navigator-tab-problems" hidden={navigatorSection !== 'problems'}>
+        <div className="navigator-filters">
+        <div className="problem-search"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg><input aria-label="Search practice problems" type="search" placeholder="Search problems or sketch text" value={search} onChange={e => setSearch(e.target.value)} /></div>
+        <label htmlFor="tag-filter">Filter by tag</label><select id="tag-filter" className="tag-filter" value={tagFilter} onChange={e => setTagFilter(e.target.value)}><option value="">All tags</option>{[...new Set([...tags, ...(tagFilter && !tags.includes(tagFilter) ? [tagFilter] : [])])].map(tag => <option key={tag} value={tag}>{tag}</option>)}</select>
+        <div className="navigator-results"><span role="status">{groups.length} {search || tagFilter ? `of ${project.problems?.length ?? 0} ` : ''}problem{(search || tagFilter ? project.problems?.length : groups.length) === 1 ? '' : 's'}</span>{(search || tagFilter) ? <button onClick={() => { setSearch(''); setTagFilter(''); }}>Clear filters</button> : <span>Newest first</span>}</div>
+        </div>
+        <ProblemList groups={groups} activeId={project.drawingId} disabled={busy} onDelete={id => void removeProblem(id)} onOpen={position => position === null ? showCurrentProblem() : void openPast(position)} />
+        <details className="navigator-transfer"><summary>Import / export</summary><label className="import-attempt">Import sketch or problems<input type="file" accept="application/json,.json,.excalidraw" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importAttempt(file); }} /></label><button disabled={busy} onClick={exportLibrary}>Export all problems</button></details>
+        </div>
+        <div id="navigator-panel-attempt" className="navigator-attempt" role="tabpanel" aria-labelledby="navigator-tab-attempt" hidden={navigatorSection !== 'attempt'}>
+        <p className="active-problem-title">{activeProblem?.title || attempt.prompt || 'Untitled problem'}</p>
+        {readOnly ? <LegacyHistory project={project} selection={legacySelection} disabled={busy} onSelect={selectLegacyCheckpoint} /> : <p className="hint">Your sketch saves automatically. Create a new problem for another sketch.</p>}
+        <div className="problem-details-heading">Problem details</div>
+        <details className="problem-tag-details"><summary>Tags{activeProblem?.companies?.length ? ` · ${activeProblem.companies.length}` : ''}</summary>{readOnly ? <div className="problem-tags">{(activeProblem?.companies ?? []).map(tag => <span key={tag}>{tag}</span>)}</div> : <TagEditor key={project.problemId} tags={activeProblem?.companies ?? []} suggestions={tags} disabled={busy} onChange={tags => change(tagProblem(current.current, tags))} />}</details>
+        {activeProblem?.description && <details className="imported-question" open><summary>Interview question</summary><TutorMarkdown>{activeProblem.description}</TutorMarkdown>
+          {activeProblem.asked && <p>Asked {activeProblem.asked.fromMonth} – {activeProblem.asked.toMonth}. {activeProblem.asked.note}</p>}
+          {activeProblem.source && /^https:\/\/(www\.)?(1point3acres\.com|hellointerview\.com)\//.test(activeProblem.source) && <a href={activeProblem.source} target="_blank" rel="noreferrer">Original interview report</a>}
+        </details>}
+        </div>
+      </aside>
+      {visible.library && <ProblemPaneResizer width={problemLayout.width} bounds={problemLayout.bounds} onResize={problemLayout.resize} />}
       <section ref={drawingBox} className="drawing" aria-label="Design canvas" aria-busy={busy}>
-        <Excalidraw theme="dark" aiEnabled={false} key={canvasKey} excalidrawAPI={onReady} onChange={onCanvasChange} initialData={{ elements: canvasElements(draft.scene), appState: { viewBackgroundColor: draft.scene.backgroundColor }, files: project.files }} viewModeEnabled={busy}>
-          <MainMenu><MainMenu.DefaultItems.LoadScene /><MainMenu.DefaultItems.SaveToActiveFile /><MainMenu.DefaultItems.Export /><MainMenu.DefaultItems.ClearCanvas /><MainMenu.Separator /><MainMenu.DefaultItems.ChangeCanvasBackground /></MainMenu>
+        {readOnly && <div className="canvas-archive-label">Archived sketch · Read only</div>}
+        <Excalidraw theme="dark" aiEnabled={false} key={canvasKey} excalidrawAPI={onReady} onChange={onCanvasChange} initialData={{ elements: canvasElements(draft.scene), appState: { viewBackgroundColor: draft.scene.backgroundColor }, files: project.files }} viewModeEnabled={busy || readOnly}
+          UIOptions={{ canvasActions: { loadScene: !readOnly, clearCanvas: !readOnly, changeViewBackgroundColor: !readOnly } }}>
+          <MainMenu>{!readOnly && <MainMenu.DefaultItems.LoadScene />}<MainMenu.DefaultItems.SaveToActiveFile /><MainMenu.DefaultItems.Export />{!readOnly && <><MainMenu.DefaultItems.ClearCanvas /><MainMenu.Separator /><MainMenu.DefaultItems.ChangeCanvasBackground /></>}</MainMenu>
         </Excalidraw>
         <div className="focus-overlays">{focuses.map((focus, i) => { const box = sceneToScreen(focus, view); return <div key={i} className="focus-box" style={{ left: box.x, top: box.y, width: box.width, height: box.height }}><span>Focus {i + 1} <button aria-label={`Remove focus ${i + 1}`} onClick={() => setFocuses(old => old.filter((_, n) => n !== i))}>×</button></span></div>; })}
         {focusScreen && <div className="focus-box selecting" style={{ left: focusScreen.x, top: focusScreen.y, width: focusScreen.width, height: focusScreen.height }} />}</div>
         {(focusing || focusStart.current) && <div className="focus-picker" aria-label="Drag tutor focus area" onPointerDown={e => { const box = e.currentTarget.getBoundingClientRect(); focusStart.current = { x: e.clientX - box.left, y: e.clientY - box.top }; e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={e => { const start = focusStart.current; if (!start) return; const b = e.currentTarget.getBoundingClientRect(); const x = e.clientX - b.left, y = e.clientY - b.top; setFocusScreen({ x: Math.min(x, start.x), y: Math.min(y, start.y), width: Math.abs(x - start.x), height: Math.abs(y - start.y) }); }} onPointerUp={finishFocus} />}
       </section>
-      {showTutor && <TutorPanel key={project.drawingId ?? "legacy"} drawingId={project.drawingId} capture={capture} onHide={() => setShowTutor(false)} startFocus={() => setFocusing(true)} clearFocus={() => setFocuses([])} hasFocus={!!focuses.length} contextLabel={`Checkpoint ${(draft.index ?? attempt.chapters.length) + 1} · ${focuses.length ? `${focuses.length} focus region${focuses.length === 1 ? "" : "s"}` : "Visible canvas"}`} />}
+      {visible.tutor && <TutorPaneResizer width={tutorLayout.width} bounds={tutorLayout.bounds} onResize={tutorLayout.resize} />}
+      <TutorPanel readOnly={readOnly} key={project.drawingId ?? "legacy"} hidden={!visible.tutor} drawingId={project.drawingId} attachmentScope={`${project.drawingId}:${draft.index === null ? draft.id ?? `next-${attempt.chapters.length}` : attempt.chapters[draft.index]?.id ?? draft.index}`} capture={capture} onHide={() => hidePane('tutor')} startFocus={() => setFocusing(true)} clearFocus={() => setFocuses([])} hasFocus={!!focuses.length} contextLabel={`${readOnly ? `Checkpoint ${(draft.index ?? attempt.chapters.length) + 1} · ` : ""}${focuses.length ? `${focuses.length} focus region${focuses.length === 1 ? "" : "s"}` : "Visible canvas"}`} />
     </main>
-    <footer className="workspace-status"><span>{saveStatus}</span>{message && <span>{message}</span>}{saveError && <span role="alert">{saveError} <button onClick={() => void persist(current.current).catch(() => {})}>Retry saving</button></span>}</footer>
+    <footer className="workspace-status" hidden={focusMode.enabled && !saveError && !message}><span>{saveStatus}</span>{message && <span>{message}</span>}{saveError && <span role="alert">{saveError} <button disabled={busy} onClick={() => void retrySave()}>Retry saving</button> <button disabled={busy} onClick={exportLibrary}>Export recovery backup</button></span>}</footer>
   </div>;
 }
