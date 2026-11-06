@@ -74,7 +74,7 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     else if (pane === 'library') setShowLibrary(false);
     else setShowTutor(false);
   };
-  const tutorLayout = useTutorPaneLayout(visible.library, problemDividerWidth);
+  const tutorLayout = useTutorPaneLayout(visible.library, problemDividerWidth, visible.tutor);
   const problemLayout = useProblemPaneLayout(tutorLayout.workspaceRef);
   const [navigatorSection, setNavigatorSection] = useState<NavigatorSection>('problems');
   const showCurrentProblem = () => {
@@ -303,7 +303,10 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     </header>
     {focusMode.enabled && <FocusToolbar preset={focusMode.preset} onPresetChange={focusMode.setPreset} onExit={() => focusMode.setEnabled(false)} exitButton={focusMode.exitButton}
       context={`${attempt.prompt}${readOnly ? ` · Read only · Checkpoint ${(draft.index ?? attempt.chapters.length) + 1}` : ""}`} />}
-    <main ref={tutorLayout.workspaceRef} className="workspace" style={{ gridTemplateColumns: `${visible.library ? `${problemLayout.width}px ${problemDividerWidth}px ` : ""}minmax(0,1fr)${visible.tutor ? ` ${tutorDividerWidth}px ${tutorLayout.width}px` : ""}` }}>
+    <main ref={tutorLayout.workspaceRef} className={`workspace${tutorLayout.stacked ? ' workspace-stacked' : ''}`} style={{
+      gridTemplateColumns: `${visible.library ? `${problemLayout.width}px ${problemDividerWidth}px ` : ""}minmax(0,1fr)${visible.tutor && !tutorLayout.stacked ? ` ${tutorDividerWidth}px ${tutorLayout.size}px` : ""}`,
+      gridTemplateRows: tutorLayout.stacked ? `minmax(0,1fr) ${tutorDividerWidth}px ${tutorLayout.size}px` : undefined,
+    }}>
       <aside id="design-problems-pane" ref={tutorLayout.libraryRef} className="chapter-panel navigator" aria-label="Practice problems" hidden={!visible.library}>
         <div className="pane-heading"><h2>Practice Problems</h2><button aria-label="Hide problems pane" onClick={() => hidePane('library')}>×</button></div>
         <div className="new-problem-row"><button disabled={busy} onClick={() => void newProblem()}>＋ New Problem</button></div>
@@ -339,7 +342,7 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
         {focusScreen && <div className="focus-box selecting" style={{ left: focusScreen.x, top: focusScreen.y, width: focusScreen.width, height: focusScreen.height }} />}</div>
         {(focusing || focusStart.current) && <div className="focus-picker" aria-label="Drag tutor focus area" onPointerDown={e => { const box = e.currentTarget.getBoundingClientRect(); focusStart.current = { x: e.clientX - box.left, y: e.clientY - box.top }; e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={e => { const start = focusStart.current; if (!start) return; const b = e.currentTarget.getBoundingClientRect(); const x = e.clientX - b.left, y = e.clientY - b.top; setFocusScreen({ x: Math.min(x, start.x), y: Math.min(y, start.y), width: Math.abs(x - start.x), height: Math.abs(y - start.y) }); }} onPointerUp={finishFocus} />}
       </section>
-      {visible.tutor && <TutorPaneResizer width={tutorLayout.width} bounds={tutorLayout.bounds} onResize={tutorLayout.resize} />}
+      {visible.tutor && <TutorPaneResizer size={tutorLayout.size} bounds={tutorLayout.bounds} onResize={tutorLayout.resize} stacked={tutorLayout.stacked} />}
       <TutorPanel readOnly={readOnly} key={project.drawingId ?? "legacy"} hidden={!visible.tutor} drawingId={project.drawingId} attachmentScope={`${project.drawingId}:${draft.index === null ? draft.id ?? `next-${attempt.chapters.length}` : attempt.chapters[draft.index]?.id ?? draft.index}`} capture={capture} onHide={() => hidePane('tutor')} startFocus={() => setFocusing(true)} clearFocus={() => setFocuses([])} hasFocus={!!focuses.length} contextLabel={`${readOnly ? `Checkpoint ${(draft.index ?? attempt.chapters.length) + 1} · ` : ""}${focuses.length ? `${focuses.length} focus region${focuses.length === 1 ? "" : "s"}` : "Visible canvas"}`} />
     </main>
     <footer className="workspace-status" hidden={focusMode.enabled && !saveError && !message}><span>{saveStatus}</span>{message && <span>{message}</span>}{saveError && <span role="alert">{saveError} <button disabled={busy} onClick={() => void retrySave()}>Retry saving</button> <button disabled={busy} onClick={exportLibrary}>Export recovery backup</button></span>}</footer>
