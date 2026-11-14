@@ -25,9 +25,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit, parse_qs
 try:
-    from .tutor import TutorStore, PROVIDERS
+    from .tutor import TutorStore, PROVIDERS, run_provider
+    from .design_review import ReviewStore
 except ImportError:
-    from tutor import TutorStore, PROVIDERS
+    from tutor import TutorStore, PROVIDERS, run_provider
+    from design_review import ReviewStore
 
 ROOT = Path(__file__).resolve().parents[1]
 PORT = 8095
@@ -111,6 +113,7 @@ def private_client(address: str) -> bool:
 class PracticeHandler(SimpleHTTPRequestHandler):
     store: ProjectStore
     tutor: TutorStore
+    review: ReviewStore
 
     def reply(self, status: int, payload: dict | None = None) -> None:
         body = json.dumps(payload).encode() if payload is not None else b""
@@ -145,7 +148,13 @@ class PracticeHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server naming)
         if not self.allowed():
             return
-        if urlsplit(self.path).path == "/static/practice/api/tutor":
+        if urlsplit(self.path).path == '/static/practice/api/review':
+            try:
+                query = parse_qs(urlsplit(self.path).query)
+                self.reply(200, self.review.public(summary=query.get('summary') == ['1']))
+            except (ValueError, OSError):
+                self.reply(503, {'error': 'The review library could not open. Try again.'})
+        elif urlsplit(self.path).path == "/static/practice/api/tutor":
             try:
                 ident = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
                 self.reply(200, self.tutor.public(ident))
@@ -184,7 +193,10 @@ class PracticeHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if not self.allowed(): return
-        if self.path not in ["/static/practice/api/tutor/ask", "/static/practice/api/tutor/cancel"]:
+        refresh = '/static/practice/api/review/refresh'
+        rate = '/static/practice/api/review/rate'
+        refine = '/static/practice/api/review/refine'
+        if self.path not in ["/static/practice/api/tutor/ask", "/static/practice/api/tutor/cancel", refresh, rate, refine]:
             self.reply(404, {"error": "Unknown action."}); return
         if self.headers.get("X-Nexo-Practice") != "1" or self.headers.get_content_type() != "application/json":
             self.reply(403, {"error": "Missing request headers."}); return
@@ -193,7 +205,14 @@ class PracticeHandler(SimpleHTTPRequestHandler):
             if not 0 < length <= 12_000_000: raise ValueError("Request too large.")
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict): raise ValueError("Expected an object.")
-            result = self.tutor.cancel(payload.get("id")) if self.path.endswith("/cancel") else self.tutor.ask(payload)
+            if self.path == refresh:
+                result = self.review.refresh()
+            elif self.path == rate:
+                result = self.review.rate(payload)
+            elif self.path == refine:
+                result = self.review.refine()
+            else:
+                result = self.tutor.cancel(payload.get("id")) if self.path.endswith("/cancel") else self.tutor.ask(payload)
             self.reply(200, result)
         except (ValueError, TypeError) as error:
             self.reply(400, {"error": str(error)})
@@ -234,12 +253,13 @@ class PracticeHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        if self.path != API:  # Autosave runs every few seconds; keep the log readable.
+        if self.path != API and not self.path.startswith('/static/practice/api/review'):  # Keep polling and autosave out of the log.
             super().log_message(format, *args)
 
 
-def server(root: Path, host: str, port: int) -> ThreadingHTTPServer:
-    store = ProjectStore(root / ".local/practice/project.json")
+def server(root: Path, host: str, port: int, data_dir: Path | None = None) -> ThreadingHTTPServer:
+    data = data_dir if data_dir is not None else root / ".local"
+    store = ProjectStore(data / "practice/project.json")
     saved = store.load()
     if saved:
         entries = [saved["project"], *saved["project"].get("past", [])]
@@ -261,7 +281,8 @@ def server(root: Path, host: str, port: int) -> ThreadingHTTPServer:
         if changed: store.save(saved["project"], saved["revision"])
     handler = partial(PracticeHandler, directory=str(root / "dist"))
     PracticeHandler.store = store
-    PracticeHandler.tutor = TutorStore(root / ".local/tutor")
+    PracticeHandler.tutor = TutorStore(data / "tutor")
+    PracticeHandler.review = ReviewStore(data / "review.sqlite", store, PracticeHandler.tutor, refiner=run_provider)
     return ThreadingHTTPServer((host, port), handler)
 
 

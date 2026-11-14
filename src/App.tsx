@@ -12,6 +12,7 @@ import { createSketchProject, deleteProblem, isSketchProject, legacyView, openPr
 import { LegacyHistory } from "./LegacyHistory";
 import { ProblemList } from "./ProblemList";
 
+import { findYoutubeVideos } from "../../shared/studyVideoUrl";
 import { TutorMarkdown } from "../../shared/TutorMarkdown";
 import { TutorPanel } from "./TutorPanel";
 import { TutorPaneResizer, useTutorPaneLayout } from "./TutorPaneResizer";
@@ -23,6 +24,17 @@ import { TagEditor } from "./TagEditor";
 import { FocusToolbar, useFocusMode } from "./DesignFocus";
 import { hideFocusPane, visibleFocusPanes } from "./focusMode";
 
+function sourceFromLocation() {
+  const params = new URLSearchParams(location.search);
+  return { drawingId: params.get('drawingId'), problemId: params.get('problemId'), checkpointId: params.get('checkpointId') };
+}
+function checkpointFromSource(project: Project, id: string | null): LegacySelection {
+  if (!id || id === project.draft.id) return null;
+  const checkpoint = project.attempt.chapters.findIndex(chapter => chapter.id === id);
+  if (checkpoint >= 0) return { index: checkpoint };
+  const saved = Object.entries(project.drafts ?? {}).find(([, draft]) => draft.id === id);
+  return saved ? { index: saved[0] === 'next' ? null : Number(saved[0]), draft: true } : null;
+}
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 function sceneFrom(elements: readonly ExcalidrawElement[], state: AppState): Scene {
   return normalizeScene({
@@ -52,38 +64,49 @@ function canvasElements(scene: Scene): ExcalidrawElement[] {
 export function App(): React.JSX.Element {
   const [loaded, setLoaded] = useState<{ project: Project; revision: string | null }>();
   const [error, setError] = useState("");
+  const [sourceNotice, setSourceNotice] = useState("");
   useEffect(() => { void loadProject().then(async value => {
     if (!value) { setLoaded({ project: createSketchProject(), revision: null }); return; }
-    const project = organizeProblems(value.project);
+    let project = organizeProblems(value.project);
+    const source = sourceFromLocation();
+    if (source.drawingId || source.problemId) {
+      const matches = (entry: Pick<Project, 'drawingId' | 'problemId'>) => source.drawingId ? entry.drawingId === source.drawingId : entry.problemId === source.problemId;
+      if (!matches(project)) {
+        const position = project.past?.findIndex(matches) ?? -1;
+        if (position >= 0) project = openProblem(project, position);
+        else setSourceNotice('That saved sketch is no longer in your library.');
+      }
+    }
     const revision = same(project, value.project) ? value.revision : await saveProject(project, value.revision);
     setLoaded({ project, revision });
   }).catch(error => setError(String(error))); }, []);
   if (error) return <main className="load-error"><h1>System Design Practice could not open</h1><p role="alert">{error}</p><p>Your stored attempt has not been replaced. Close other practice tabs and reload.</p></main>;
   if (!loaded) return <main className="load-error">Opening your practice problems…</main>;
-  return <Practice initial={loaded.project} initialRevision={loaded.revision} />;
+  return <Practice initial={loaded.project} initialRevision={loaded.revision} sourceNotice={sourceNotice} />;
 }
 
-function Practice({ initial, initialRevision }: { initial: Project; initialRevision: string | null }): React.JSX.Element {
+function Practice({ initial, initialRevision, sourceNotice }: { initial: Project; initialRevision: string | null; sourceNotice: string }): React.JSX.Element {
   const api = useRef<ExcalidrawImperativeAPI | null>(null);
-  const [showLibrary, setShowLibrary] = useState(localStorage.getItem("practice-problems-pane") !== "hidden");
+  const [showLibrary, setShowLibrary] = useState(() => localStorage.getItem("practice-problems-pane") === "visible");
+  const [sourceDetails, setSourceDetails] = useState(() => !!(sourceFromLocation().drawingId || sourceFromLocation().problemId));
   const [showTutor, setShowTutor] = useState(localStorage.getItem("practice-tutor-pane") !== "hidden");
   const focusMode = useFocusMode();
-  const visible = visibleFocusPanes(focusMode.enabled, focusMode.preset, { library: showLibrary, tutor: showTutor });
+  const visible = visibleFocusPanes(focusMode.enabled, focusMode.preset, { library: showLibrary || sourceDetails, tutor: showTutor });
   const hidePane = (pane: 'library' | 'tutor') => {
     if (focusMode.enabled) focusMode.setPreset(hideFocusPane(focusMode.preset, pane));
-    else if (pane === 'library') setShowLibrary(false);
+    else if (pane === 'library') { setShowLibrary(false); setSourceDetails(false); }
     else setShowTutor(false);
   };
   const tutorLayout = useTutorPaneLayout(visible.library, problemDividerWidth, visible.tutor);
   const problemLayout = useProblemPaneLayout(tutorLayout.workspaceRef);
-  const [navigatorSection, setNavigatorSection] = useState<NavigatorSection>('problems');
+  const [navigatorSection, setNavigatorSection] = useState<NavigatorSection>(() => sourceFromLocation().drawingId || sourceFromLocation().problemId ? 'attempt' : 'problems');
   const showCurrentProblem = () => {
     setNavigatorSection('attempt');
     requestAnimationFrame(() => document.getElementById('navigator-tab-attempt')?.focus());
   };
   const [search, setSearch] = useState("");
   const [tagFilter, setTagFilter] = useState("");
-  const [legacySelection, setLegacySelection] = useState<LegacySelection>(null);
+  const [legacySelection, setLegacySelection] = useState<LegacySelection>(() => checkpointFromSource(initial, sourceFromLocation().checkpointId));
   const viewing = useRef(initial);
   const [focuses, setFocuses] = useState<Focus[]>([]);
   const [view, setView] = useState<View>({ scrollX: 0, scrollY: 0, zoom: 1, width: 1, height: 1 });
@@ -103,7 +126,8 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
   const [saveError, setSaveError] = useState("");
   const [busy, setBusy] = useState(false);
   const [canvasKey, setCanvasKey] = useState(0);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(sourceNotice);
+  const queuedVideos = useRef(new Set<string>());
   const loadingCanvas = useRef(false);
 
 
@@ -150,6 +174,23 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     window.addEventListener("keydown", key); window.addEventListener("keyup", key); window.addEventListener("blur", blur);
     return () => { window.removeEventListener("keydown", key); window.removeEventListener("keyup", key); window.removeEventListener("blur", blur); };
   }, []);
+  const queueVideos = useCallback((urls: string[], entry: Project, report = false): void => {
+    for (const url of urls) {
+      const key = `${entry.drawingId}:${url}`;
+      if (queuedVideos.current.has(key)) continue;
+      queuedVideos.current.add(key);
+      const problemTitle = entry.problems?.find(p => p.id === entry.problemId)?.title || entry.attempt.prompt;
+      void fetch('/api/study-videos', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Practice-Pad': '1' },
+        body: JSON.stringify({ url, source: 'canvas', problemId: entry.problemId, problemTitle, drawingId: entry.drawingId }) })
+        .then(response => {
+          if (!response.ok) throw new Error('Video save failed');
+          if (report) setMessage('YouTube video saved. Find it in Videos.');
+        }).catch(() => {
+          queuedVideos.current.delete(key);
+          if (report) setMessage('The link is on the canvas. Video Library could not save it yet.');
+        });
+    }
+  }, []);
   const onCanvasChange = useCallback((elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles): void => {
     if (loadingCanvas.current) return;
     const nextView = { scrollX: appState.scrollX, scrollY: appState.scrollY, zoom: appState.zoom.value, width: appState.width, height: appState.height };
@@ -159,8 +200,10 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
     const scene = sceneFrom(elements, appState);
     const allFiles = { ...old.files, ...files };
     if (same(scene, old.draft.scene) && same(allFiles, old.files)) return;
-    change({ ...old, files: allFiles, draft: { ...old.draft, scene } });
-  }, [change]);
+    const next = { ...old, files: allFiles, draft: { ...old.draft, scene } };
+    change(next);
+    queueVideos(scene.elements.flatMap(element => [element.link, element.text].flatMap(value => typeof value === 'string' ? findYoutubeVideos(value) : [])), next);
+  }, [change, queueVideos]);
   const loadCanvas = (next: Project): void => {
     setFocuses([]); setFocusScreen(null); setFocusing(false); setLegacySelection(null);
     loadingCanvas.current = true; current.current = next; setProject(next); setCanvasKey(value => value + 1);
@@ -298,10 +341,10 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
   const groups = newestProblems(project).filter(problem => matchesCompany(problem, tagFilter)).map(problem => ({ problem, entries: entries.filter(({ entry }) => entry.problemId === problem.id && (matchesSearch(entry, search) || (!!search.trim() && search.toLowerCase().trim().split(/\s+/).every(word => `${problem.title} ${problem.description || ''} ${problem.intuition || ''} ${(problem.companies ?? []).join(' ')}`.toLowerCase().includes(word))))).sort((a, b) => (a.entry.attemptNumber ?? 1) - (b.entry.attemptNumber ?? 1)) })).filter(g => g.entries.length);
   return <div className={`practice-app${focusMode.enabled ? ' design-focus-mode' : ''}`} data-focus-layout={focusMode.enabled ? focusMode.preset : undefined}>
     <header className="practice-header" hidden={focusMode.enabled}>
-      <div className="app-identity"><h1>System Design Practice</h1><input aria-label="Practice problem title" maxLength={2000} disabled={busy} readOnly={readOnly} value={attempt.prompt} placeholder="Untitled problem" onChange={e => change(renameProblem(current.current, e.target.value))} /></div>
-      <nav><button aria-pressed={showLibrary} onClick={() => setShowLibrary(!showLibrary)}>Problems</button><button aria-pressed={showTutor} onClick={() => setShowTutor(!showTutor)}>Tutor</button><button ref={focusMode.enterButton} onClick={() => focusMode.setEnabled(true)} aria-label="Enter Focus mode">Focus</button></nav>
+      <div className="app-identity"><h1 className="design-sr-only">System Design Practice</h1><input aria-label="Practice problem title" maxLength={2000} disabled={busy} readOnly={readOnly} value={attempt.prompt} placeholder="Untitled problem" onChange={e => change(renameProblem(current.current, e.target.value))} /></div>
+      <nav aria-label="Canvas tools"><button disabled={busy} onClick={() => void newProblem()}>New sketch</button><button aria-pressed={visible.library} onClick={() => { setSourceDetails(false); setShowLibrary(!visible.library); }}>Problems</button><button aria-pressed={showTutor} onClick={() => setShowTutor(!showTutor)}>Tutor</button><button className="canvas-focus-button" ref={focusMode.enterButton} onClick={() => focusMode.setEnabled(true)} aria-label="Enter Focus mode">Focus</button></nav>
     </header>
-    {focusMode.enabled && <FocusToolbar preset={focusMode.preset} onPresetChange={focusMode.setPreset} onExit={() => focusMode.setEnabled(false)} exitButton={focusMode.exitButton}
+    {focusMode.enabled && <FocusToolbar preset={focusMode.preset} onPresetChange={focusMode.setPreset} onExit={() => focusMode.setEnabled(false)} exitButton={focusMode.exitButton} reviewDue={focusMode.reviewDue} onReview={focusMode.openReview}
       context={`${attempt.prompt}${readOnly ? ` · Read only · Checkpoint ${(draft.index ?? attempt.chapters.length) + 1}` : ""}`} />}
     <main ref={tutorLayout.workspaceRef} className={`workspace${tutorLayout.stacked ? ' workspace-stacked' : ''}`} style={{
       gridTemplateColumns: `${visible.library ? `${problemLayout.width}px ${problemDividerWidth}px ` : ""}minmax(0,1fr)${visible.tutor && !tutorLayout.stacked ? ` ${tutorDividerWidth}px ${tutorLayout.size}px` : ""}`,
@@ -324,6 +367,10 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
         <p className="active-problem-title">{activeProblem?.title || attempt.prompt || 'Untitled problem'}</p>
         {readOnly ? <LegacyHistory project={project} selection={legacySelection} disabled={busy} onSelect={selectLegacyCheckpoint} /> : <p className="hint">Your sketch saves automatically. Create a new problem for another sketch.</p>}
         <div className="problem-details-heading">Problem details</div>
+        {(activeProblem?.intuition || draft.notes) && <details className="imported-question" open={!!sourceFromLocation().checkpointId}><summary>Saved notes</summary>
+          {activeProblem?.intuition && <TutorMarkdown>{activeProblem.intuition}</TutorMarkdown>}
+          {draft.notes && draft.notes !== activeProblem?.intuition && <TutorMarkdown>{draft.notes}</TutorMarkdown>}
+        </details>}
         <details className="problem-tag-details"><summary>Tags{activeProblem?.companies?.length ? ` · ${activeProblem.companies.length}` : ''}</summary>{readOnly ? <div className="problem-tags">{(activeProblem?.companies ?? []).map(tag => <span key={tag}>{tag}</span>)}</div> : <TagEditor key={project.problemId} tags={activeProblem?.companies ?? []} suggestions={tags} disabled={busy} onChange={tags => change(tagProblem(current.current, tags))} />}</details>
         {activeProblem?.description && <details className="imported-question" open><summary>Interview question</summary><TutorMarkdown>{activeProblem.description}</TutorMarkdown>
           {activeProblem.asked && <p>Asked {activeProblem.asked.fromMonth} – {activeProblem.asked.toMonth}. {activeProblem.asked.note}</p>}
@@ -334,7 +381,8 @@ function Practice({ initial, initialRevision }: { initial: Project; initialRevis
       {visible.library && <ProblemPaneResizer width={problemLayout.width} bounds={problemLayout.bounds} onResize={problemLayout.resize} />}
       <section ref={drawingBox} className="drawing" aria-label="Design canvas" aria-busy={busy}>
         {readOnly && <div className="canvas-archive-label">Archived sketch · Read only</div>}
-        <Excalidraw theme="dark" aiEnabled={false} key={canvasKey} excalidrawAPI={onReady} onChange={onCanvasChange} initialData={{ elements: canvasElements(draft.scene), appState: { viewBackgroundColor: draft.scene.backgroundColor }, files: project.files }} viewModeEnabled={busy || readOnly}
+        <Excalidraw theme="dark" aiEnabled={false} key={canvasKey} excalidrawAPI={onReady} onChange={onCanvasChange}
+          onPaste={data => { const old = current.current; if (isSketchProject(old) && data.text) queueVideos(findYoutubeVideos(data.text), old, true); return true; }} initialData={{ elements: canvasElements(draft.scene), appState: { viewBackgroundColor: draft.scene.backgroundColor }, files: project.files }} viewModeEnabled={busy || readOnly}
           UIOptions={{ canvasActions: { loadScene: !readOnly, clearCanvas: !readOnly, changeViewBackgroundColor: !readOnly } }}>
           <MainMenu>{!readOnly && <MainMenu.DefaultItems.LoadScene />}<MainMenu.DefaultItems.SaveToActiveFile /><MainMenu.DefaultItems.Export />{!readOnly && <><MainMenu.DefaultItems.ClearCanvas /><MainMenu.Separator /><MainMenu.DefaultItems.ChangeCanvasBackground /></>}</MainMenu>
         </Excalidraw>

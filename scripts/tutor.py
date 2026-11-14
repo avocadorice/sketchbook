@@ -119,9 +119,10 @@ def clean_env():
     env['PATH'] = str(Path.home()/'.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
     return env
 
-def run_provider(provider, effort, prompt, image, work, cancel):
+def run_provider(provider, effort, prompt, image, work, cancel, *, instructions=None):
     env = clean_env()
-    instructions = COMPACTION_INSTRUCTIONS if json.loads(prompt).get('task') == 'compact_conversation' else INSTRUCTIONS
+    if instructions is None:
+        instructions = COMPACTION_INSTRUCTIONS if json.loads(prompt).get('task') == 'compact_conversation' else INSTRUCTIONS
     if provider == 'chatgpt':
         binary = str(Path.home()/'.local/bin/codex')
         auth = subprocess.run([binary,'login','status'],env=env,capture_output=True,text=True,timeout=15)
