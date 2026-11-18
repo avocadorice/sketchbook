@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 const localAssets = mkdtempSync(join(tmpdir(), "practicepad-design-assets-"));
+cpSync(fileURLToPath(new URL('./public/', import.meta.url)), localAssets, { recursive: true });
 
 // Excalidraw resolves fonts at runtime; serve every font locally in both dev and builds.
 cpSync(

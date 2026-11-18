@@ -1,0 +1,12 @@
+{
+  "id": "/system-design/",
+  "name": "System Design",
+  "short_name": "System Design",
+  "description": "System design sketches, checkpoints, tutor conversations, and review.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#15171c",
+  "theme_color": "#15171c",
+  "icons": [{ "src": "./system-design.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

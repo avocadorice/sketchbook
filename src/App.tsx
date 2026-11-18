@@ -23,6 +23,9 @@ import { NavigatorTabs, type NavigatorSection } from "./NavigatorTabs";
 import { TagEditor } from "./TagEditor";
 import { FocusToolbar, useFocusMode } from "./DesignFocus";
 import { hideFocusPane, visibleFocusPanes } from "./focusMode";
+import { DesignReview, useReviewDue, type ReviewSource } from '../../src/DesignReview';
+import { Feedback } from '../../src/Feedback';
+import { systemDesignUrl } from '../../shared/systemDesignUrl';
 
 function sourceFromLocation() {
   const params = new URLSearchParams(location.search);
@@ -65,6 +68,22 @@ export function App(): React.JSX.Element {
   const [loaded, setLoaded] = useState<{ project: Project; revision: string | null }>();
   const [error, setError] = useState("");
   const [sourceNotice, setSourceNotice] = useState("");
+  const [review, setReview] = useState(() => new URLSearchParams(location.search).get('mode') === 'review');
+  const [navigationError, setNavigationError] = useState('');
+  const due = useReviewDue();
+  useEffect(() => { document.title = review ? 'System Design · Review' : 'System Design Practice'; }, [review]);
+  const navigate = async (toReview: boolean, source?: ReviewSource) => {
+    try {
+      if (!review || source) await window.sketchbookFlushDraft?.();
+      setNavigationError('');
+      if (source) { location.assign(systemDesignUrl(source)); return; }
+      const params = new URLSearchParams(location.search);
+      if (toReview) params.set('mode', 'review');
+      else params.delete('mode');
+      history.replaceState(null, '', `${location.pathname}${params.size ? `?${params}` : ''}${location.hash}`);
+      setReview(toReview);
+    } catch (cause) { setNavigationError(`Could not save before switching. ${cause instanceof Error ? cause.message : String(cause)}`); }
+  };
   useEffect(() => { void loadProject().then(async value => {
     if (!value) { setLoaded({ project: createSketchProject(), revision: null }); return; }
     let project = organizeProblems(value.project);
@@ -82,10 +101,24 @@ export function App(): React.JSX.Element {
   }).catch(error => setError(String(error))); }, []);
   if (error) return <main className="load-error"><h1>System Design Practice could not open</h1><p role="alert">{error}</p><p>Your stored attempt has not been replaced. Close other practice tabs and reload.</p></main>;
   if (!loaded) return <main className="load-error">Opening your practice problems…</main>;
-  return <Practice initial={loaded.project} initialRevision={loaded.revision} sourceNotice={sourceNotice} />;
+  return <div className="design-app">
+    {navigationError && <div className="design-navigation-error" role="alert">{navigationError}</div>}
+    <div className="design-practice" hidden={review}>
+      <Practice initial={loaded.project} initialRevision={loaded.revision} sourceNotice={sourceNotice}
+        active={!review} reviewDue={due ?? 0} onReview={() => void navigate(true)} />
+    </div>
+    {review && <div className="design-review-page">
+      <header className="practice-header"><h1>System Design</h1><nav aria-label="System Design workspace">
+        <button onClick={() => void navigate(false)}>Back to sketch</button>
+      </nav><Feedback mode="review" /></header>
+      <main><DesignReview onOpenSource={source => void navigate(false, source)} /></main>
+    </div>}
+  </div>;
 }
 
-function Practice({ initial, initialRevision, sourceNotice }: { initial: Project; initialRevision: string | null; sourceNotice: string }): React.JSX.Element {
+function Practice({ initial, initialRevision, sourceNotice, active, reviewDue, onReview }: {
+  initial: Project; initialRevision: string | null; sourceNotice: string; active: boolean; reviewDue: number; onReview: () => void;
+}): React.JSX.Element {
   const api = useRef<ExcalidrawImperativeAPI | null>(null);
   const [showLibrary, setShowLibrary] = useState(() => localStorage.getItem("practice-problems-pane") === "visible");
   const [sourceDetails, setSourceDetails] = useState(() => !!(sourceFromLocation().drawingId || sourceFromLocation().problemId));
@@ -321,7 +354,8 @@ function Practice({ initial, initialRevision, sourceNotice }: { initial: Project
   };
   useEffect(() => {
     window.sketchbookFlushDraft = async () => { if (writer.current) await writer.current; if (failure.current) throw failure.current; };
-    return () => { delete window.sketchbookFlushDraft; };
+    window.practicePadFlushDraft = window.sketchbookFlushDraft;
+    return () => { delete window.sketchbookFlushDraft; delete window.practicePadFlushDraft; };
   }, [persist]);
   const displayed = legacyView(project, legacySelection);
   viewing.current = displayed;
@@ -341,10 +375,11 @@ function Practice({ initial, initialRevision, sourceNotice }: { initial: Project
   const groups = newestProblems(project).filter(problem => matchesCompany(problem, tagFilter)).map(problem => ({ problem, entries: entries.filter(({ entry }) => entry.problemId === problem.id && (matchesSearch(entry, search) || (!!search.trim() && search.toLowerCase().trim().split(/\s+/).every(word => `${problem.title} ${problem.description || ''} ${problem.intuition || ''} ${(problem.companies ?? []).join(' ')}`.toLowerCase().includes(word))))).sort((a, b) => (a.entry.attemptNumber ?? 1) - (b.entry.attemptNumber ?? 1)) })).filter(g => g.entries.length);
   return <div className={`practice-app${focusMode.enabled ? ' design-focus-mode' : ''}`} data-focus-layout={focusMode.enabled ? focusMode.preset : undefined}>
     <header className="practice-header" hidden={focusMode.enabled}>
-      <div className="app-identity"><h1 className="design-sr-only">System Design Practice</h1><input aria-label="Practice problem title" maxLength={2000} disabled={busy} readOnly={readOnly} value={attempt.prompt} placeholder="Untitled problem" onChange={e => change(renameProblem(current.current, e.target.value))} /></div>
-      <nav aria-label="Canvas tools"><button disabled={busy} onClick={() => void newProblem()}>New sketch</button><button aria-pressed={visible.library} onClick={() => { setSourceDetails(false); setShowLibrary(!visible.library); }}>Problems</button><button aria-pressed={showTutor} onClick={() => setShowTutor(!showTutor)}>Tutor</button><button className="canvas-focus-button" ref={focusMode.enterButton} onClick={() => focusMode.setEnabled(true)} aria-label="Enter Focus mode">Focus</button></nav>
+      <div className="app-identity"><h1>System Design</h1><input aria-label="Practice problem title" maxLength={2000} disabled={busy} readOnly={readOnly} value={attempt.prompt} placeholder="Untitled problem" onChange={e => change(renameProblem(current.current, e.target.value))} /></div>
+      <nav aria-label="Canvas tools"><button disabled={busy} onClick={() => void newProblem()}>New sketch</button><button aria-pressed={visible.library} onClick={() => { setSourceDetails(false); setShowLibrary(!visible.library); }}>Problems</button><button aria-pressed={showTutor} onClick={() => setShowTutor(!showTutor)}>Tutor</button><button disabled={busy} onClick={onReview}>Review{reviewDue > 0 ? ` · ${reviewDue}` : ''}</button><button className="canvas-focus-button" ref={focusMode.enterButton} onClick={() => focusMode.setEnabled(true)} aria-label="Enter Focus mode">Focus</button></nav>
+      {active && <Feedback mode="system-design" />}
     </header>
-    {focusMode.enabled && <FocusToolbar preset={focusMode.preset} onPresetChange={focusMode.setPreset} onExit={() => focusMode.setEnabled(false)} exitButton={focusMode.exitButton} reviewDue={focusMode.reviewDue} onReview={focusMode.openReview}
+    {focusMode.enabled && <FocusToolbar preset={focusMode.preset} onPresetChange={focusMode.setPreset} onExit={() => focusMode.setEnabled(false)} exitButton={focusMode.exitButton} reviewDue={reviewDue} onReview={onReview}
       context={`${attempt.prompt}${readOnly ? ` · Read only · Checkpoint ${(draft.index ?? attempt.chapters.length) + 1}` : ""}`} />}
     <main ref={tutorLayout.workspaceRef} className={`workspace${tutorLayout.stacked ? ' workspace-stacked' : ''}`} style={{
       gridTemplateColumns: `${visible.library ? `${problemLayout.width}px ${problemDividerWidth}px ` : ""}minmax(0,1fr)${visible.tutor && !tutorLayout.stacked ? ` ${tutorDividerWidth}px ${tutorLayout.size}px` : ""}`,
