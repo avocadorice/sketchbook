@@ -55,14 +55,14 @@ export function deleteProblem(project: Project, problemId: string): Project {
     ...(past?.length ? { past } : {}) };
 }
 
-export type LegacySelection = { index: number | null; draft?: boolean } | null;
+export type LegacySelection = { index: number | null; draft?: boolean; savedDraft?: boolean } | null;
 
 /** A temporary read-only view: never persist it over the legacy entry's active draft. */
 export function legacyView(project: Project, selection: LegacySelection): Project {
   if (!selection || isSketchProject(project)) return project;
   const { index } = selection;
   if (selection.draft) {
-    const draft = project.draft.index === index ? project.draft : project.drafts?.[index === null ? 'next' : String(index)];
+    const draft = !selection.savedDraft && project.draft.index === index ? project.draft : project.drafts?.[index === null ? 'next' : String(index)];
     return draft ? { ...project, draft: { ...draft, index } } : project;
   }
   if (index === null || !project.attempt.chapters[index]) return project;

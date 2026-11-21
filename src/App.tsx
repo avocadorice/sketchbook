@@ -9,6 +9,7 @@ import { tutorContext, tutorConversationContext, matchesSearch, type Focus } fro
 import { organizeProblems, renameProblem, tagProblem, matchesCompany, newestProblems } from "./problems";
 import { captureViewport, visibleRegions, screenToScene, sceneToScreen, type View } from "./viewport";
 import { createSketchProject, deleteProblem, isSketchProject, legacyView, openProblem, shelveProject, type LegacySelection } from "./workspace";
+import { checkpointFromSource } from './sourceSelection';
 import { LegacyHistory } from "./LegacyHistory";
 import { ProblemList } from "./ProblemList";
 
@@ -29,14 +30,7 @@ import { systemDesignUrl } from '../../shared/systemDesignUrl';
 
 function sourceFromLocation() {
   const params = new URLSearchParams(location.search);
-  return { drawingId: params.get('drawingId'), problemId: params.get('problemId'), checkpointId: params.get('checkpointId') };
-}
-function checkpointFromSource(project: Project, id: string | null): LegacySelection {
-  if (!id || id === project.draft.id) return null;
-  const checkpoint = project.attempt.chapters.findIndex(chapter => chapter.id === id);
-  if (checkpoint >= 0) return { index: checkpoint };
-  const saved = Object.entries(project.drafts ?? {}).find(([, draft]) => draft.id === id);
-  return saved ? { index: saved[0] === 'next' ? null : Number(saved[0]), draft: true } : null;
+  return { drawingId: params.get('drawingId'), problemId: params.get('problemId'), checkpointId: params.get('checkpointId'), scene: params.get('scene') };
 }
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 function sceneFrom(elements: readonly ExcalidrawElement[], state: AppState): Scene {
@@ -139,7 +133,10 @@ function Practice({ initial, initialRevision, sourceNotice, active, reviewDue, o
   };
   const [search, setSearch] = useState("");
   const [tagFilter, setTagFilter] = useState("");
-  const [legacySelection, setLegacySelection] = useState<LegacySelection>(() => checkpointFromSource(initial, sourceFromLocation().checkpointId));
+  const [legacySelection, setLegacySelection] = useState<LegacySelection>(() => {
+    const source = sourceFromLocation();
+    return checkpointFromSource(initial, source.checkpointId, source.scene);
+  });
   const viewing = useRef(initial);
   const [focuses, setFocuses] = useState<Focus[]>([]);
   const [view, setView] = useState<View>({ scrollX: 0, scrollY: 0, zoom: 1, width: 1, height: 1 });
